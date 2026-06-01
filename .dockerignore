@@ -1,0 +1,19 @@
+# Python caches and bytecode
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Local env / credential files (env.yaml contains live SMTP + session secrets)
+.env
+env.yaml
+*.token.json
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+
+# VCS metadata
+.git/
+.gitignore

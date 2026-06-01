@@ -1,0 +1,67 @@
+# Standardized deployment manifest — see ../GCLOUD_POLICY.md
+# Source of truth for `python ../manage.py`. deploy.sh is the standalone fallback.
+app: tv-scheduler
+prefix: tvsched
+region: europe-west1
+type: service
+
+artifact_registry:
+  repo: tvsched
+  image: tvsched/app:latest
+
+service_account:
+  name: tvsched-sa
+  display: "TV Scheduler — Cloud Scheduler invoker"
+  roles: [roles/run.invoker]
+
+buckets:
+  - role: data
+    suffix: tvsched-data
+    volume_mount: /mnt/data
+
+# Files uploaded to the data bucket on install if present locally.
+# manage.py's do_uploads() skips entries whose local file is missing.
+uploads:
+  - local: assets/models/tv_component_models.joblib
+    bucket_role: data
+    dest: models/tv_component_models.joblib
+  # User-specific ranker preferences (gitignored). Mounts at
+  # /mnt/data/ranker_prefs.yaml inside the container — the default
+  # RANKER_PREFS_PATH in src/ranker.py.
+  - local: ranker_prefs.yaml
+    bucket_role: data
+    dest: ranker_prefs.yaml
+
+env_file: env.yaml
+base_url_var: BASE_URL
+
+# Filled from ../user_config.yaml at install (only when missing/placeholder).
+env_from_shared:
+  SMTP_HOST: smtp_host
+  SMTP_PORT: smtp_port
+  SMTP_USER: smtp_user
+  SMTP_PASS: smtp_pass
+  EMAIL_TO: email_to
+# Auto-generated with secrets.token_hex(32) if missing/placeholder.
+env_generated:
+  - SECRET_KEY
+  - ACCESS_TOKEN
+  - JOB_TOKEN
+
+service:
+  name: tvsched
+  allow_unauthenticated: true
+  memory: 2Gi
+  cpu: 2
+  max_instances: 1
+  timeout: 1800
+
+schedulers:
+  - name: tvsched-weekly-sched
+    schedule: "0 7 1,13,25 * *"
+    time_zone: Europe/Berlin
+    http_method: GET
+    path: /internal/run-job
+    auth: token
+    token_env: JOB_TOKEN
+    attempt_deadline: 1800s

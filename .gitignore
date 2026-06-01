@@ -1,0 +1,29 @@
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Secrets — never commit
+env.yaml
+.env
+*.token.json
+credentials.json
+
+# User-specific ranker preferences (personal channel weights, must-watch list).
+# ranker_prefs.example.yaml IS committed and serves as the bootstrap template.
+ranker_prefs.yaml
+
+# Local database and model (both live in GCS in production)
+data/
+*.db
+
+# The bundled model is large and rebuilt by scripts/retrain.py.
+# Copy it manually before building — see README.md "Step 2: Copy the pre-trained model".
+assets/models/*.joblib
