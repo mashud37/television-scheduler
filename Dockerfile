@@ -18,6 +18,6 @@ RUN mkdir -p assets/models
 
 ENV PYTHONUNBUFFERED=1
 
-# Run gunicorn from src/ so all inter-module imports resolve without a package prefix.
+# Run gunicorn from tvsched/ so all inter-module imports resolve without a package prefix.
 # Long timeout — scraping 200+ detail pages can take up to 30 minutes.
-CMD exec gunicorn --chdir /app/src --bind "0.0.0.0:$PORT" --workers 1 --threads 2 --timeout 1800 app:app
+CMD exec gunicorn --chdir /app/tvsched --bind "0.0.0.0:$PORT" --workers 1 --threads 2 --timeout 1800 app:app

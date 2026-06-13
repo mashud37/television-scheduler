@@ -7,7 +7,7 @@ import sys
 import pandas as pd
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(_ROOT, "src"))
+sys.path.insert(0, os.path.join(_ROOT, "tvsched"))
 
 REQUIRED = {"title", "Description", "Cast", "Crew", "channel", "user_selected"}
 

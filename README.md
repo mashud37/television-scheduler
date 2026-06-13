@@ -353,13 +353,13 @@ Cloud Scheduler (every ~12 days, 07:00 Berlin)
 
 | File | Purpose |
 |------|---------|
-| `src/app.py` | Flask web app — selection grid, job trigger endpoint |
-| `src/db.py` | SQLite schema and all data-access functions |
-| `src/scraper.py` | TVSpielfilm HTML scraper (listing pages + detail pages) |
-| `src/ranker.py` | `RankerConfig`, model loading, `score_shows()` |
-| `src/trainer.py` | Auto-retraining: Ridge regression + TF-IDF, one model per text field |
-| `src/emailer.py` | Notification email (with link) + selection email (`.ics` attachment) |
-| `src/scheduler_job.py` | Orchestrator called by the job trigger route |
+| `tvsched/app.py` | Flask web app — selection grid, job trigger endpoint |
+| `tvsched/db.py` | SQLite schema and all data-access functions |
+| `tvsched/scraper.py` | TVSpielfilm HTML scraper (listing pages + detail pages) |
+| `tvsched/ranker.py` | `RankerConfig`, model loading, `score_shows()` |
+| `tvsched/trainer.py` | Auto-retraining: Ridge regression + TF-IDF, one model per text field |
+| `tvsched/emailer.py` | Notification email (with link) + selection email (`.ics` attachment) |
+| `tvsched/scheduler_job.py` | Orchestrator called by the job trigger route |
 | `scripts/import_historical.py` | Seed training table from desktop-app CSV exports |
 | `scripts/retrain.py` | Retrain model locally and optionally upload to GCS |
 | `scripts/run_job_local.py` | Run one full job cycle locally for testing |
