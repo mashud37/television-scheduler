@@ -160,12 +160,12 @@ def scrape_tvspielfilm(
     max_page = 1
 
     while page <= max_page:
+        log(f"Scraping page {page}/{max_page}")
         qs = dict(qs_base, page=str(page))
         r = s.get(BASE_URL, params=qs, timeout=timeout_seconds)
         r.raise_for_status()
         soup = BeautifulSoup(r.text, "html.parser")
         max_page = max(max_page, _get_max_page(soup))
-        log(f"Scraping page {page}/{max_page}")
 
         for tr in soup.select("tr.hover"):
             x = _parse_row(tr)
@@ -196,9 +196,8 @@ def scrape_tvspielfilm(
     details = []
     total = len(df)
     for i, href in enumerate(df["href"].fillna("").tolist(), start=1):
+        log(f"  [{i}/{total}] detail page")
         details.append(_scrape_detail(href, session=s, timeout=timeout_seconds))
-        if i % 20 == 0:
-            log(f"  Detail scraping: {i}/{total}")
         if sleep_seconds > 0:
             time.sleep(sleep_seconds)
 

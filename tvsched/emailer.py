@@ -1,9 +1,24 @@
 import os
 import smtplib
 from collections import defaultdict
+from datetime import date, datetime, timedelta
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from typing import List, Dict
+
+
+def _parse_show_date(run_date: str, date_str: str) -> date:
+    if not date_str:
+        return date.max
+    try:
+        day, month = (int(p) for p in date_str.strip().rstrip(".").split("."))
+    except ValueError:
+        return date.max
+    anchor = datetime.strptime(run_date, "%Y-%m-%d").date()
+    candidate = date(anchor.year, month, day)
+    if candidate < anchor - timedelta(days=3):
+        candidate = date(anchor.year + 1, month, day)
+    return candidate
 
 
 def _smtp_config():
@@ -32,12 +47,15 @@ def send_notification_email(run_date: str, scored_shows: List[Dict], access_toke
     url = f"{base_url}/run/{run_date}?token={access_token}"
     total = len(scored_shows)
 
-    by_date: Dict[str, int] = defaultdict(int)
+    by_date: Dict[str, List] = defaultdict(list)
     for s in scored_shows:
-        label = f"{s.get('weekday', '')} {s.get('date', '')}".strip()
-        by_date[label] += 1
+        by_date[s.get("date", "")].append(s)
 
-    date_lines = "\n".join(f"  {d}: {n}" for d, n in sorted(by_date.items()))
+    ordered_dates = sorted(by_date, key=lambda d: _parse_show_date(run_date, d))
+    date_lines = "\n".join(
+        f"  {(by_date[d][0].get('weekday', '') + ' ' + d).strip()}: {len(by_date[d])}"
+        for d in ordered_dates
+    )
     body = f"Shows found for the coming two weeks:\n\n{date_lines}\n\n{url}"
 
     msg = MIMEText(body, "plain")
@@ -53,12 +71,13 @@ def send_selection_email(run_date: str, selected_shows: List[Dict], ics_content:
 
     by_date: Dict[str, List] = defaultdict(list)
     for s in selected_shows:
-        label = f"{s.get('weekday', '')} {s.get('date', '')}".strip()
-        by_date[label].append(s)
+        by_date[s.get("date", "")].append(s)
 
-    for date_label in sorted(by_date.keys()):
+    for date_str in sorted(by_date, key=lambda d: _parse_show_date(run_date, d)):
+        shows = by_date[date_str]
+        date_label = (shows[0].get("weekday", "") + " " + date_str).strip()
         lines.append(f"\n---- {date_label} ----")
-        for s in by_date[date_label]:
+        for s in shows:
             lines.append(f"  {s.get('time', '')}  {s.get('title', '')} / {s.get('channel', '')}")
             if s.get("Genre"):
                 lines.append(f"  {s['Genre']}")
