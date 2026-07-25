@@ -1,5 +1,5 @@
-# Standardized deployment manifest — see ../GCLOUD_POLICY.md
-# Source of truth for `python ../manage.py`. deploy.sh is the standalone fallback.
+# Standardized deployment manifest, see ../GCLOUD_POLICY.md
+# Single source of truth for `python ../manage.py`.
 app: tv-scheduler
 prefix: tvsched
 region: europe-west1
@@ -11,7 +11,7 @@ artifact_registry:
 
 service_account:
   name: tvsched-sa
-  display: "TV Scheduler — Cloud Scheduler invoker"
+  display: "TV Scheduler, Cloud Scheduler invoker"
   roles: [roles/run.invoker]
 
 buckets:
@@ -26,7 +26,7 @@ uploads:
     bucket_role: data
     dest: models/tv_component_models.joblib
   # User-specific ranker preferences (gitignored). Mounts at
-  # /mnt/data/ranker_prefs.yaml inside the container — the default
+  # /mnt/data/ranker_prefs.yaml inside the container, the default
   # RANKER_PREFS_PATH in tvsched/ranker.py.
   - local: ranker_prefs.yaml
     bucket_role: data
@@ -56,12 +56,20 @@ service:
   max_instances: 1
   timeout: 1800
 
+# Fires twice a day; the job exits in a few seconds unless CYCLE_DAYS have passed
+# since the last run that produced scores. A failed cycle therefore costs half a
+# day rather than a whole cycle, with no extra infrastructure. The 12-hour cadence
+# also gives the dead-man's-switch alert (23h absence window, the Cloud Monitoring
+# maximum) two missed wake-ups of margin before it fires.
 schedulers:
   - name: tvsched-weekly-sched
-    schedule: "0 7 1,13,25 * *"
+    schedule: "0 7,19 * * *"
     time_zone: Europe/Berlin
     http_method: GET
     path: /internal/run-job
     auth: token
     token_env: JOB_TOKEN
     attempt_deadline: 1800s
+    max_retry_attempts: 3
+    min_backoff: 300s
+    max_backoff: 3600s

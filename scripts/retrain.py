@@ -20,7 +20,7 @@ def main():
     os.environ.setdefault("MODEL_PATH", args.out)
 
     from db import get_training_data, get_training_stats, init_db
-    from trainer import retrain_and_save, MIN_SELECTED
+    from trainer import MIN_SELECTED, retrain_and_save
 
     init_db()
     total, n_selected = get_training_stats()

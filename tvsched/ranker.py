@@ -4,7 +4,6 @@ import json
 import os
 import re
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
 
 import joblib
 import numpy as np
@@ -37,12 +36,12 @@ class RankerConfig:
     schema and a worked example.
     """
     # Empty by default — user fills in channel weights in their YAML.
-    channel_prior: Dict[str, float] = field(default_factory=dict)
+    channel_prior: dict[str, float] = field(default_factory=dict)
     default_channel_score: float = 1.0
     # Empty by default — user fills in their must-watch shows in YAML.
-    must_watch_keywords: List[str] = field(default_factory=list)
+    must_watch_keywords: list[str] = field(default_factory=list)
     # Generic component weights — app-tuning, not user-personal.
-    component_weights: Dict[str, float] = field(default_factory=lambda: {
+    component_weights: dict[str, float] = field(default_factory=lambda: {
         "channel": 1.5, "title": 1.3, "Description": 0.7, "Cast": 0.25, "Crew": 0.15,
     })
     # Generic prime-time slot bounds (20:00 / 22:00 / 24:00). Override in YAML
@@ -59,7 +58,7 @@ def _read_prefs_file(path: str) -> dict:
     if not os.path.exists(path):
         return {}
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             text = f.read()
         if path.lower().endswith((".yaml", ".yml")):
             data = yaml.safe_load(text)
@@ -94,7 +93,7 @@ def load_config() -> RankerConfig:
     return cfg
 
 
-def save_config(cfg: RankerConfig, path: Optional[str] = None) -> None:
+def save_config(cfg: RankerConfig, path: str | None = None) -> None:
     """Write the prefs to YAML. Atomic write: temp file + rename."""
     target = path or RANKER_PREFS_PATH
     os.makedirs(os.path.dirname(target) or ".", exist_ok=True)
@@ -113,7 +112,7 @@ def save_config(cfg: RankerConfig, path: Optional[str] = None) -> None:
     os.replace(tmp, target)
 
 
-def load_model() -> Optional[dict]:
+def load_model() -> dict | None:
     for path in [MODEL_PATH, BUNDLED_MODEL]:
         if os.path.exists(path):
             try:
@@ -126,7 +125,7 @@ def load_model() -> Optional[dict]:
     return None
 
 
-def _parse_start_min(time_str: str) -> float:
+def parse_start_min(time_str: str) -> float:
     if not isinstance(time_str, str):
         return np.nan
     m = re.search(r"(\d{1,2}):(\d{2})", time_str.replace(".", ":"))
@@ -135,7 +134,7 @@ def _parse_start_min(time_str: str) -> float:
     return int(m.group(1)) * 60 + int(m.group(2))
 
 
-def _slot(mins: float, early: int, late: int, end: int) -> str:
+def slot_of(mins: float, early: int, late: int, end: int) -> str:
     if pd.isna(mins):
         return "night"
     if early <= mins < late:
@@ -152,7 +151,7 @@ def _zscore(s: pd.Series) -> pd.Series:
     return (s - mu) / sd
 
 
-def _must_watch_re(keywords: List[str]) -> Optional[re.Pattern]:
+def _must_watch_re(keywords: list[str]) -> re.Pattern | None:
     kws = [k.strip() for k in keywords if k and k.strip()]
     if not kws:
         return None
@@ -162,7 +161,7 @@ def _must_watch_re(keywords: List[str]) -> Optional[re.Pattern]:
     )
 
 
-def score_shows(shows: list, model: Optional[dict], config: RankerConfig) -> list:
+def score_shows(shows: list, model: dict | None, config: RankerConfig) -> list:
     if not shows:
         return shows
 
@@ -171,9 +170,9 @@ def score_shows(shows: list, model: Optional[dict], config: RankerConfig) -> lis
         if col not in df.columns:
             df[col] = ""
 
-    df["start_min"] = df["time"].apply(_parse_start_min)
+    df["start_min"] = df["time"].apply(parse_start_min)
     df["slot"] = df["start_min"].apply(
-        lambda x: _slot(x, config.early_start_min, config.late_start_min, config.late_end_min)
+        lambda x: slot_of(x, config.early_start_min, config.late_start_min, config.late_end_min)
     )
     df["s_channel_raw"] = (
         df["channel"].map(config.channel_prior).fillna(config.default_channel_score).astype(float)

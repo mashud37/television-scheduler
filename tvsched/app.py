@@ -1,23 +1,31 @@
 import html
-import json
 import os
 import re
 import secrets
 from datetime import datetime
 
 import pandas as pd
+from db import (
+    get_run_shows_with_scores,
+    get_session_selections,
+    get_titles_from_previous_runs,
+    get_training_data,
+    init_db,
+    save_session,
+    session_done,
+)
+from emailer import send_selection_email
 from flask import (
-    Flask, render_template_string, request, redirect, url_for, session, abort,
+    Flask,
+    abort,
+    redirect,
+    render_template_string,
+    request,
+    session,
+    url_for,
 )
 from ics import Calendar, Event
-
-from db import (
-    init_db, get_run_shows_with_scores, session_done,
-    get_session_selections, save_session, get_training_data,
-    get_titles_from_previous_runs,
-)
 from trainer import retrain_and_save
-from emailer import send_selection_email
 
 init_db()
 
@@ -87,27 +95,31 @@ def _build_ics(selected_shows: list) -> str:
 
     for s in selected_shows:
         try:
-            date_str = (s.get("date") or "").strip().rstrip(".")
-            time_str = s.get("time") or ""
-            d_parts = date_str.split(".")
-            day, month = int(d_parts[0]), int(d_parts[1])
-            t_parts = time_str.split("-")
-            start_s = t_parts[0].strip()
-            end_s = t_parts[1].strip()
+            if s.get("start_utc") and s.get("end_utc"):
+                dt_start = datetime.fromisoformat(s["start_utc"])
+                dt_end = datetime.fromisoformat(s["end_utc"])
+            else:
+                date_str = (s.get("date") or "").strip().rstrip(".")
+                time_str = s.get("time") or ""
+                d_parts = date_str.split(".")
+                day, month = int(d_parts[0]), int(d_parts[1])
+                t_parts = time_str.split("-")
+                start_s = t_parts[0].strip()
+                end_s = t_parts[1].strip()
 
-            year = now.year + (1 if month < now.month else 0)
-            base = pd.Timestamp(year=year, month=month, day=day)
-            dt_start = (base + pd.Timedelta(start_s + ":00")).tz_localize("Europe/Berlin")
-            dt_end = (base + pd.Timedelta(end_s + ":00")).tz_localize("Europe/Berlin")
-            if dt_end <= dt_start:
-                dt_end += pd.Timedelta(days=1)
+                year = now.year + (1 if month < now.month else 0)
+                base = pd.Timestamp(year=year, month=month, day=day)
+                dt_start = (base + pd.Timedelta(start_s + ":00")).tz_localize("Europe/Berlin")
+                dt_end = (base + pd.Timedelta(end_s + ":00")).tz_localize("Europe/Berlin")
+                if dt_end <= dt_start:
+                    dt_end += pd.Timedelta(days=1)
 
             e = Event()
             is_new = str(s.get("Year", "")) == str(now.year)
             prefix = "NEU: " if is_new else ""
             e.name = f"{prefix}{s.get('title', '')} / {s.get('channel', '')}"
-            e.begin = dt_start.to_pydatetime()
-            e.end = dt_end.to_pydatetime()
+            e.begin = getattr(dt_start, "to_pydatetime", lambda: dt_start)()
+            e.end = getattr(dt_end, "to_pydatetime", lambda: dt_end)()
             e.description = s.get("href") or s.get("Description") or ""
             cal.events.add(e)
         except Exception as err:
@@ -438,12 +450,14 @@ def run_job():
     if not secrets.compare_digest(token, JOB_TOKEN):
         abort(401)
     from scheduler_job import run
+    force = request.args.get("force", "").lower() in ("1", "true", "yes")
     try:
-        run()
+        result = run(force=force)
     except Exception as e:
-        print(f"Scheduled job failed: {e}")
         return f"error: {e}", 500
-    return "ok", 200
+    if result.get("skipped"):
+        return f"skipped: {result['reason']}", 200
+    return f"ok: scored {result.get('scored', 0)}", 200
 
 
 if __name__ == "__main__":

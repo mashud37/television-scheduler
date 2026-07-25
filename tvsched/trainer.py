@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 from datetime import datetime
-from typing import List, Dict
 
 import joblib
 import pandas as pd
@@ -27,7 +26,7 @@ def _build_model() -> Pipeline:
     ])
 
 
-def retrain_and_save(training_rows: List[Dict]) -> bool:
+def retrain_and_save(training_rows: list[dict]) -> bool:
     n_selected = sum(1 for r in training_rows if int(r.get("selected", 0)) == 1)
     if n_selected < MIN_SELECTED:
         print(f"Retraining skipped: only {n_selected} selected shows (need {MIN_SELECTED})")
@@ -47,7 +46,7 @@ def retrain_and_save(training_rows: List[Dict]) -> bool:
         "crew": "Crew",
     }
 
-    models: Dict = {}
+    models: dict = {}
     for db_col, model_key in field_map.items():
         col_data = df[db_col].fillna("").astype(str) if db_col in df.columns else pd.Series([""] * len(df))
         m = _build_model()

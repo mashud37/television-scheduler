@@ -1,384 +1,166 @@
-# TV Scheduler
+# television-scheduler
 
-A personal TV-programme monitoring service with adaptive machine-learning ranking, running on Google Cloud Platform.
+The goal of television-scheduler is to scan a week of German public-service TV listings for the handful of shows worth watching. Every cycle the job pulls the schedule straight from the broadcasters' own programme APIs, keeps the programmes that are produced content rather than news or live magazines, scores each one against pre-trained text models (title, description, cast, crew) plus channel preferences and must-watch keywords, and emails a notification with a link to a selection page. Ticking shows and saving produces a calendar file to import and, more importantly, becomes labelled training data: the ranking model retrains immediately after each selection, so every subsequent run reflects the viewer's taste more precisely. All personal data stays in a private Cloud Storage bucket that only this service can read.
 
-## How it works
+## Sources
 
-Every 12 days, Cloud Scheduler fires a job that:
+Listings come from the broadcasters directly, so there is no scraping and nothing to be blocked by.
 
-1. Scrapes 14 days of prime-time listings from TVSpielfilm (sports + series, public TV)
-2. Scores every show using pre-trained text models (title, description, cast, crew) plus your channel preferences and must-watch keywords
-3. Sends you a **notification email** with a summary and a link to the selection page
+| Tier | Channels | API | Metadata |
+|---|---|---|---|
+| ZDF family | ZDF, ZDFneo, ZDFinfo, 3sat, phoenix, ARTE | `api.zdf.de/cmdm/epg` | cast, crew, year, country, genre |
+| ARD family | Das Erste, BR, HR, MDR, NDR, Radio Bremen, RBB, SR, SWR, WDR, ONE, KiKA, ARD alpha, tagesschau24 | `programm-api.ard.de` | cast, crew, plus year, country and genre where the subline carries them |
 
-You open the link in any browser, tick the shows you want to watch, and click **Save & send calendar**. The service then:
+ARTE, 3sat and phoenix appear in both APIs; the ZDF one wins, because it publishes full credits. The ARD API caps the horizon at 8 days, which sets the cycle length. Endpoint shapes were established with reference to [oerc](https://github.com/emschu/oerc) and [zapp-backend](https://github.com/mediathekview/zapp-backend), though both parse a narrower set of fields than this tool needs.
 
-1. Emails you a **`.ics` calendar file** — import into Google Calendar, Outlook, or Apple Calendar
-2. Saves your selections as labelled training data
-3. **Automatically retrains** the ranking model so every subsequent run reflects your taste more precisely
+## Data flow
 
----
+```mermaid
+flowchart TD
+    SCHED[/"Cloud Scheduler<br/>07:00 and 19:00 Berlin"/] -->|"GET /internal/run-job<br/>?token=JOB_TOKEN"| GATE{"CYCLE_DAYS<br/>since last<br/>success?"}
+    GATE -->|no| SKIP[/"exit in a few seconds"/]
+    GATE -->|yes| JOB["scheduler_job.run()"]
+    JOB --> RETRAIN1["Retrain model<br/>(if enough selections)"]
+    JOB --> ARD["ARD API<br/>1 call per day"]
+    JOB --> ZDF["ZDF API<br/>1 call per channel"]
+    ARD --> RAW[("all broadcasts<br/>GCS-mounted /mnt/data")]
+    ZDF --> RAW
+    RAW --> CAND["select_candidates()<br/>slot, channel, genre,<br/>format, cast; dedupe simulcasts"]
+    CAND --> SCORE["score_shows()<br/>channel + text models + keywords"]
+    SCORE --> DB[("scores")]
+    SCORE --> NOTIFY[/"Notification email"/]
+    JOB -.->|"any stage raises"| FAIL[/"Failure email<br/>naming the stage"/]
 
-## Prerequisites
+    NOTIFY -->|"user clicks link"| GRID["GET /run/&lt;date&gt;<br/>?token=ACCESS_TOKEN"]
+    GRID --> PAGE[/"Schedule grid"/]
+    PAGE -->|"Save & send calendar"| POST["POST /run/&lt;date&gt;/select"]
+    POST --> ICS["Build .ics calendar"]
+    ICS --> RESULT[/"Selection email<br/>.ics attached"/]
+    POST --> RETRAIN2["Retrain model immediately"]
+    RETRAIN2 --> MODEL[("tv_component_models.joblib")]
 
-| Requirement | Notes |
-|-------------|-------|
-| Google Cloud account with billing enabled | Billing must be active on the project |
-| `gcloud` CLI | [Install guide](https://cloud.google.com/sdk/docs/install) |
-| Python 3.10+ | Only needed if running locally |
-| Gmail address + App Password | [Create one here](https://myaccount.google.com/apppasswords) — requires 2FA on the account |
+    classDef store fill:#e8f0fe,stroke:#4285f4,color:#1a1a1a;
+    classDef trigger fill:#e6f4ea,stroke:#34a853,color:#1a1a1a;
+    classDef bad fill:#fce8e6,stroke:#d93025,color:#1a1a1a;
+    class DB,MODEL,RAW store;
+    class SCHED,NOTIFY,PAGE,RESULT trigger;
+    class FAIL bad;
+```
 
----
+## Layout
 
-## One-time setup
+```
+tvsched/app.py                Flask app: selection grid, settings, job trigger endpoint
+tvsched/sources/              broadcaster API clients
+  channels.py                 canonical channel names and which API owns each
+  ard.py                      ARD listings, teaser credits, subline production data
+  zdf.py                      ZDF EPG broadcasts and programme-item details
+  collect.py                  runs both sources, normalises to the show record
+  fetch.py                    JSON GET with retry and typed source errors
+tvsched/candidates.py         reduces a full schedule to the programmes worth ranking
+tvsched/ranker.py             RankerConfig, model loading, score_shows()
+tvsched/trainer.py            auto-retraining: Ridge regression + TF-IDF
+tvsched/db.py                 SQLite schema, additive migrations, data access
+tvsched/emailer.py            notification, selection (.ics) and failure emails
+tvsched/scheduler_job.py      the scheduled run, stage by stage
+scripts/import_historical.py  seeds training data from desktop-app CSV exports
+scripts/retrain.py            retrain the model locally, optionally upload to GCS
+scripts/run_job_local.py      run one full job cycle locally for testing
+ranker_prefs.example.yaml     committed template; ranker_prefs.yaml is gitignored
+gcloud_app.yaml               manifest read by the shared ../manage.py orchestrator
+env.yaml.example              committed template; env.yaml is gitignored
+```
 
-Run all commands from the VS Code terminal (PowerShell).
-
-### Step 1 — Authenticate and create a project
+## Setup
 
 ```powershell
 gcloud auth login
-gcloud config set project YOUR_SHARED_PROJECT
+gcloud config set project YOUR_PROJECT
+gcloud services enable run.googleapis.com cloudscheduler.googleapis.com `
+  storage.googleapis.com artifactregistry.googleapis.com cloudbuild.googleapis.com
 ```
 
-Billing is managed through the [GCP Console](https://console.cloud.google.com/billing) — link the new project to your billing account there if it is not linked automatically.
+Copy `env.yaml.example` to `env.yaml` and fill in SMTP settings (a personal Gmail address with a 2FA App Password) plus three random tokens generated with `python -c "import secrets; print(secrets.token_hex(32))"` for `SECRET_KEY`, `ACCESS_TOKEN` and `JOB_TOKEN`. Leave `BASE_URL` as the placeholder until after the first deploy, then paste the printed service URL in and redeploy so the service knows its own address. Running `python ../manage.py` and choosing Install provisions the bucket, service, scheduler and Artifact Registry retention policy from `gcloud_app.yaml`.
 
-### Step 2 — Enable required APIs
+Without a pre-trained model the service still works: it ranks by channel preferences and must-watch keywords until enough selections have accumulated to train on.
 
-```powershell
-gcloud services enable `
-  run.googleapis.com `
-  cloudscheduler.googleapis.com `
-  storage.googleapis.com `
-  artifactregistry.googleapis.com `
-  cloudbuild.googleapis.com
-```
+## Commands
 
-### Step 3 — Create the GCS bucket
+Running `python ../manage.py` with no arguments opens the interactive menu.
 
-The bucket holds the SQLite database and the ranking model, mounted into Cloud Run at `/mnt/data`.
+| Action | Command |
+|---|---|
+| Install or update everything from the manifest | `python ../manage.py` |
+| Trigger a run manually, respecting the cycle gate | `gcloud scheduler jobs run tvsched-weekly-sched --location=europe-west1` |
+| Force a run now, ignoring the cycle gate | `curl "$SERVICE_URL/internal/run-job?token=$JOB_TOKEN&force=1"` |
+| Tail logs | `gcloud logging read "resource.type=cloud_run_revision AND resource.labels.service_name=tvsched" --limit=50 --format="table(timestamp, textPayload)"` |
+| Update env vars only (no rebuild) | `gcloud run services update tvsched --region=europe-west1 --env-vars-file=env.yaml` |
+| Run one job cycle locally | `python scripts/run_job_local.py --skip-email` |
+| Seed training data from desktop-app CSVs | `python scripts/import_historical.py --csv-dir "PATH" --db-path data/tv_scheduler.db` |
+| Retrain and upload the model | `python scripts/retrain.py --db-path data/tv_scheduler.db --out assets/models/tv_component_models.joblib --upload "gs://YOUR_BUCKET/models/tv_component_models.joblib"` |
+| Upload edited preferences | `gcloud storage cp ranker_prefs.yaml gs://YOUR_BUCKET/ranker_prefs.yaml` |
 
-```powershell
-$PROJECT = gcloud config get-value project
-$BUCKET = "$PROJECT-tvsched-data"
-$REGION = "europe-west1"
+## Which programmes get ranked
 
-gcloud storage buckets create "gs://$BUCKET" `
-  --location=$REGION `
-  --uniform-bucket-level-access `
-  --labels=app=tv-scheduler
-```
+The full schedule is stored, but only a slice of it is scored and shown. A broadcast survives five gates, in `tvsched/candidates.py`:
 
-### Step 4 — Upload the pre-trained model
+| Gate | Rule |
+|---|---|
+| Slot | starts inside a configured viewing slot |
+| Channel | its `channel_prior` weight is above `-100`, so hiding a channel actually hides it |
+| Genre | not news, magazine, documentary, sport, talk, quiz or cabaret |
+| Format | not a presented format, meaning the only credited roles are moderation or editorial |
+| Fiction | has a **cast**, or failing that an explicitly fictional genre |
 
-```powershell
-mkdir -Force assets/models
-cp "C:/path/to/tv scheduler app/assets/models/tv_component_models.joblib" `
-   assets/models/tv_component_models.joblib
+**A cast is the sharp signal.** Drama, films and series credit actors; documentaries and news credit a crew and a presenter but no cast. Filtering on cast rather than on credits generally is what separates a film from a documentary, and it lifts cast coverage on the ranked set to 100%.
 
-gcloud storage cp assets/models/tv_component_models.joblib `
-  "gs://$BUCKET/models/tv_component_models.joblib"
-```
+Finally, simulcasts are collapsed. Radio Bremen carries most of NDR's evening schedule and the regional channels share films, so the same broadcast can appear on several channels at the same minute; the copy on the most preferred channel wins.
 
-> **Shortcut:** `deploy.sh` in this directory uploads the model and automates Steps 3–9 in one shot — see the script header for usage (requires bash).
-
-If you have no existing model the service still works — it ranks by channel preferences and must-watch keywords until you have made at least five selections.
-
-### Step 5 — Generate secret tokens
-
-Run this three times and save the output:
-
-```powershell
-python -c "import secrets; print(secrets.token_hex(32))"
-```
-
-| Token | Purpose |
-|-------|---------|
-| `SECRET_KEY` | Signs Flask session cookies |
-| `ACCESS_TOKEN` | Appended to the selection-page link in every notification email |
-| `JOB_TOKEN` | Authenticates Cloud Scheduler's HTTP call to `/internal/run-job` |
-
-### Step 6 — Create env.yaml
-
-```powershell
-cp env.yaml.example env.yaml
-```
-
-Fill in all values:
-
-```yaml
-SMTP_HOST: "smtp.gmail.com"
-SMTP_PORT: "587"
-SMTP_USER: "your.address@gmail.com"
-SMTP_PASS: "abcd efgh ijkl mnop"
-EMAIL_TO:  "you@example.com"
-
-BASE_URL: ""                              # fill in after first deploy (Step 7)
-
-SECRET_KEY:   "paste-first-token-here"
-ACCESS_TOKEN: "paste-second-token-here"
-JOB_TOKEN:    "paste-third-token-here"
-
-DB_PATH:     "/mnt/data/tv_scheduler.db"
-MODEL_PATH:  "/mnt/data/models/tv_component_models.joblib"
-CONFIG_PATH: "/mnt/data/ranker_config.json"
-
-HTTPS: "true"
-```
-
-**Never commit `env.yaml` to git.** It is in `.gitignore`.
-
-### Step 7 — Deploy to Cloud Run
-
-`--source .` builds a container image via Cloud Build and deploys it in one step. The Artifact Registry repository is created automatically.
-
-```powershell
-gcloud run deploy tvsched `
-  --source . `
-  --region $REGION `
-  --env-vars-file env.yaml `
-  --add-volume "name=data,type=cloud-storage,bucket=$BUCKET" `
-  --add-volume-mount "volume=data,mount-path=/mnt/data" `
-  --memory 2Gi `
-  --cpu 2 `
-  --timeout 1800 `
-  --max-instances 1 `
-  --allow-unauthenticated `
-  --labels app=tv-scheduler
-```
-
-When the command finishes it prints a **Service URL** that looks like `https://tvsched-HASH-ew.a.run.app`.
-
-### Step 8 — Set BASE_URL and redeploy
-
-Copy the Service URL from Step 7 into `env.yaml`:
-
-```yaml
-BASE_URL: "https://tvsched-HASH-ew.a.run.app"
-```
-
-Then redeploy to apply it:
-
-```powershell
-gcloud run services update tvsched `
-  --region $REGION `
-  --env-vars-file env.yaml
-```
-
-### Step 9 — Create the Cloud Scheduler job
-
-```powershell
-$SERVICE_URL = gcloud run services describe tvsched `
-  --region $REGION `
-  --format="value(status.url)"
-
-gcloud scheduler jobs create http tvsched-weekly-sched `
-  --location $REGION `
-  --schedule "0 7 1,13,25 * *" `
-  --uri "$SERVICE_URL/internal/run-job?token=YOUR_JOB_TOKEN" `
-  --http-method GET `
-  --attempt-deadline 1800s `
-  --time-zone "Europe/Berlin"
-```
-
-Replace `YOUR_JOB_TOKEN` with the `JOB_TOKEN` value from `env.yaml`.
-
-> The schedule `0 7 1,13,25 * *` fires on the 1st, 13th, and 25th of each month at 07:00 Berlin time. Adjust to your preference.
-
-### Step 10 — Verify
-
-```powershell
-# Health check
-Invoke-WebRequest "$SERVICE_URL/healthz"
-
-# Trigger a manual run
-gcloud scheduler jobs run tvsched-weekly-sched --location $REGION
-
-# Check logs
-gcloud logging read `
-  "resource.type=cloud_run_revision AND resource.labels.service_name=tvsched" `
-  --limit 50 `
-  --format "table(timestamp, textPayload)"
-```
-
----
-
-## Day-to-day use
-
-1. You receive an email: **"TV Guide — 2026-05-09 (147)"**
-2. Click the link — a ranked schedule grid opens in your browser
-3. Tick the shows you want to watch (must-watch highlights are marked in blue)
-4. Click **Save & send calendar**
-5. You receive a second email with `tv_schedule_2026-05-09.ics` attached
-6. Import the `.ics` into your calendar
-
-The model retrains immediately after each selection. After a few cycles it learns your preferences precisely.
-
----
+Storing everything means the slot boundaries can be widened later and the run rescored without refetching. If the filter ever removes an implausible share of in-slot broadcasts, the run fails loudly rather than quietly emailing a thin guide, on the assumption that source metadata has degraded rather than that the week is genuinely quiet.
 
 ## Customising the ranking
 
-User preferences live in a hand-editable YAML file. Out of the box the code ships with **empty personal defaults** — no embedded channel preferences or must-watch lists — and falls back to the committed [`ranker_prefs.example.yaml`](ranker_prefs.example.yaml) so a fresh deploy is still functional.
+User preferences live in a hand-editable YAML file, `ranker_prefs.yaml`, gitignored so personal settings never reach source control. A fresh deploy falls back to the committed `ranker_prefs.example.yaml`. The easiest path is the `/settings` page on the deployed app, which exposes must-watch keywords, channel preferences (name to weight, negative values penalise, large negatives such as `-100` effectively hide a channel), and the three time-slot boundaries; saves write back to the YAML file atomically.
 
-### Editing in the web UI (easiest)
+> Channel names must match the canonical names in `tvsched/sources/channels.py` exactly. A name that does not match silently falls back to `default_channel_score` and loses the strongest ranking signal, so every run logs any collected channel that has no weight configured.
 
-Open `/settings` in the deployed app. The page exposes:
-- **Must-watch keywords** — one per line; matches are always ranked first
-- **Channel preferences** — `Channel Name: weight` per line; negative values penalise, large negatives (e.g. `-100`) effectively hide a channel
-- **Time slot boundaries** — three `HH:MM` values defining early / late / end of evening slots
+The ranker resolves its preferences path in order: `RANKER_PREFS_PATH` (default `/mnt/data/ranker_prefs.yaml`), the legacy `CONFIG_PATH` JSON file if still set, the bundled `ranker_prefs.example.yaml`, then empty defaults.
 
-Saves write back to the YAML prefs file atomically (temp file + rename).
+## Reliability
 
-### Editing the YAML directly
+The job must either deliver a guide or say why it could not, so four layers sit under it.
 
-```powershell
-# 1. start from the bundled example
-Copy-Item ranker_prefs.example.yaml ranker_prefs.yaml
+**Deliver or notify.** Every stage is labelled, and any exception sends a failure email naming the stage, the exception and a link to the logs. That path depends on nothing but the SMTP settings, so it still works when the database, the model or the sources are the thing that broke.
 
-# 2. edit ranker_prefs.yaml in your editor of choice
+**Degrade instead of aborting.** The two sources are fetched independently. If one fails, the run continues with the other and the notification arrives flagged `[partial]` with a banner naming what is missing. Only a total failure of both stops the run.
 
-# 3. upload to the mounted GCS path used by Cloud Run
-gcloud storage cp ranker_prefs.yaml "gs://$BUCKET/ranker_prefs.yaml"
-```
+**Self-healing schedule.** Cloud Scheduler fires twice a day, but a full run happens only once `CYCLE_DAYS` have passed since the last run that produced scores; otherwise the job exits in a few seconds. A failed cycle therefore costs half a day rather than a whole cycle, and Cloud Scheduler retries three times with backoff on top of that.
 
-Changes take effect on the next scheduled run — no redeployment needed.
+**Dead-man's switch.** Two Cloud Monitoring policies watch from outside the app, both built on log-based metrics so they do not depend on the app being able to report anything:
 
-**Note**: `ranker_prefs.yaml` is in `.gitignore` so your personal preferences never end up in source control. The `.example.yaml` template IS committed and serves both as documentation and as the bootstrap fallback.
+| Policy | Condition | Catches |
+|---|---|---|
+| `tvsched: run failed` | any occurrence of a logged failure | a run that raised but could not send its own failure email |
+| `tvsched: no heartbeat` | no wake-up logged for 23 hours | a paused or deleted schedule, a crash-looping container, a broken revision |
 
-### Path resolution
+The job logs a heartbeat line every time it wakes, running or skipping. Twice-daily wake-ups give the 23-hour absence window (the Cloud Monitoring maximum) two missed wake-ups of margin, so it signals a real outage rather than timing jitter.
 
-The ranker checks, in order:
-1. `$RANKER_PREFS_PATH` (default: `/mnt/data/ranker_prefs.yaml`)
-2. `$CONFIG_PATH` (legacy — used to point at a JSON file; still accepted, parser chosen by extension)
-3. `ranker_prefs.example.yaml` bundled in the image
-4. Empty defaults (no channel weights, no must-watch list)
+## Common failures
 
-| Field | Effect |
-|-------|--------|
-| `channel_prior` | Positive values boost a channel; `-100` effectively hides it |
-| `default_channel_score` | Score used when a channel isn't listed |
-| `must_watch_keywords` | Shows whose title matches are always ranked first |
-| `component_weights` | How much each text field contributes to the final score |
-| `early_start_min` / `late_start_min` / `late_end_min` | Slot boundaries (minutes since midnight) |
+- **A source returns 401 or 403**: treated as a credential problem rather than a transient one and never retried. The ZDF client sends a bearer token that is a public constant taken from the broadcaster's own web player; override it with `ZDF_API_KEY` if it ever rotates.
+- **"No model found" in the logs**: the model path is empty; upload a model during setup, or make enough selections through the web UI to trigger an automatic retrain.
+- **Selection email arrives but the `.ics` is empty**: the calendar builder prefers the exact `start_utc`/`end_utc` timestamps stored with each broadcast and only falls back to parsing the display strings for rows predating them.
+- **A calendar entry's link does not open**: ZDF-family programmes link their public page through the API's sharing-url relation, and ARD programmes link a Mediathek search, because ARD's own deep link 404s whenever a programme is not currently available on demand. Anything without a resolvable page falls back to a search on the broadcaster's site.
+- **Ranking looks flat**: check the run log for channels collected without a `channel_prior` weight. Every unweighted channel scores identically, which removes the largest single ranking signal.
 
----
+## Cost
 
-## Importing historical training data
+| Resource | Schedule | Runtime | Monthly |
+|---|---|---|---|
+| Cloud Run compute | wakes twice daily, full run each cycle | a few seconds when skipping, about a minute when running | a few cents |
+| Cloud Storage | continuous | database plus model | a fraction of a cent |
+| Cloud Scheduler (1 job) | daily | | ~$0.10 |
+| Cloud Build | on redeploy | | a few cents |
+| **Total** | | | **well under $1/month** |
 
-If you have training CSVs from the desktop app, seed the model before the first run:
-
-```powershell
-python scripts/import_historical.py `
-  --csv-dir "C:/path/to/tv scheduler app/csv" `
-  --db-path data/tv_scheduler.db
-
-python scripts/retrain.py `
-  --db-path data/tv_scheduler.db `
-  --out assets/models/tv_component_models.joblib `
-  --upload "gs://${PROJECT}-tvsched-data/models/tv_component_models.joblib"
-```
-
----
-
-## Running locally (for testing)
-
-Create a `.env` file with the same keys as `env.yaml.example` (one `KEY=value` per line), then:
-
-```powershell
-pip install -r requirements.txt
-
-python scripts/run_job_local.py
-python scripts/run_job_local.py --skip-email
-python scripts/run_job_local.py --run-date 2026-05-09 --skip-email
-```
-
----
-
-## Updating the deployment
-
-After changing any source file:
-
-```powershell
-gcloud run deploy tvsched `
-  --source . `
-  --region $REGION `
-  --env-vars-file env.yaml `
-  --add-volume "name=data,type=cloud-storage,bucket=$BUCKET" `
-  --add-volume-mount "volume=data,mount-path=/mnt/data"
-```
-
-To update only environment variables (no new build):
-
-```powershell
-gcloud run services update tvsched `
-  --region $REGION `
-  --env-vars-file env.yaml
-```
-
----
-
-## Architecture
-
-```
-Cloud Scheduler (every ~12 days, 07:00 Berlin)
-    |
-    +-- GET /internal/run-job?token=JOB_TOKEN
-            |
-            +-- retrain model (if >= 5 selections accumulated)
-            +-- scrape TVSpielfilm  (14-day prime-time window)
-            +-- score_shows()       (channel + text models + keywords)
-            +-- save to SQLite (GCS mount)
-            +-- send notification email
-                    |
-                    +-- User clicks link --> /run/<date>?token=ACCESS_TOKEN
-                                |
-                                +-- schedule grid (grouped by date / slot)
-                                        |
-                                        +-- POST /run/<date>/select
-                                                |
-                                                +-- save selections + training data
-                                                +-- build .ics calendar
-                                                +-- send selection email (.ics attached)
-                                                +-- retrain model immediately
-```
-
-### Data persistence (GCS bucket)
-
-| GCS path | Contents |
-|----------|---------|
-| `models/tv_component_models.joblib` | Current ranking model — overwritten after each retraining |
-| `tv_scheduler.db` | SQLite: shows, scores, selections, training data |
-| `ranker_config.json` | Optional custom channel/keyword/weight config |
-
-### Source files
-
-| File | Purpose |
-|------|---------|
-| `tvsched/app.py` | Flask web app — selection grid, job trigger endpoint |
-| `tvsched/db.py` | SQLite schema and all data-access functions |
-| `tvsched/scraper.py` | TVSpielfilm HTML scraper (listing pages + detail pages) |
-| `tvsched/ranker.py` | `RankerConfig`, model loading, `score_shows()` |
-| `tvsched/trainer.py` | Auto-retraining: Ridge regression + TF-IDF, one model per text field |
-| `tvsched/emailer.py` | Notification email (with link) + selection email (`.ics` attachment) |
-| `tvsched/scheduler_job.py` | Orchestrator called by the job trigger route |
-| `scripts/import_historical.py` | Seed training table from desktop-app CSV exports |
-| `scripts/retrain.py` | Retrain model locally and optionally upload to GCS |
-| `scripts/run_job_local.py` | Run one full job cycle locally for testing |
-
----
-
-## Troubleshooting
-
-**The Scheduler job times out**  
-Scraping 200+ detail pages takes 10–30 minutes. The Cloud Run timeout is set to 1800 s (30 min) and Scheduler's `--attempt-deadline` matches. If it still times out, reduce the scope by editing `DEFAULT_FIXED_QS` in `scraper.py` (e.g. remove the `SP` sports category).
-
-**"No model found" in the logs**  
-The GCS model path is empty. Run Step 4 to upload the model, or make at least five selections via the web UI to trigger an automatic retrain.
-
-**Selection email arrives but .ics is empty**  
-The date/time parser in `_build_ics()` could not parse a show's time string. The `time` column must be in `HH:MM-HH:MM` format.
-
-**"Retraining skipped: only N selected shows"**  
-The model retrains once you have at least five selections across all runs. Use `scripts/import_historical.py` to bootstrap from existing data.
-
-**Cloud Run returns 401 on the selection page**  
-The `ACCESS_TOKEN` in the email link does not match the one in `env.yaml`. Redeploy after updating `env.yaml`.
+> Estimates only, verify current pricing in the Google Cloud console before relying on them.

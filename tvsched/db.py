@@ -1,5 +1,5 @@
-import sqlite3
 import os
+import sqlite3
 from contextlib import contextmanager
 
 DB_PATH = os.environ.get("DB_PATH", "data/tv_scheduler.db")
@@ -71,6 +71,19 @@ def init_db():
                 run_date TEXT
             );
         """)
+        _migrate(conn)
+
+
+def _migrate(conn):
+    existing = {r[1] for r in conn.execute("PRAGMA table_info(shows)")}
+    for column in ("start_utc", "end_utc"):
+        if column not in existing:
+            conn.execute(f"ALTER TABLE shows ADD COLUMN {column} TEXT DEFAULT ''")
+    conn.executescript("""
+        CREATE INDEX IF NOT EXISTS idx_shows_run_date ON shows(run_date);
+        CREATE INDEX IF NOT EXISTS idx_scores_run_date ON scores(run_date);
+        CREATE INDEX IF NOT EXISTS idx_selections_run_date ON selections(run_date);
+    """)
 
 
 def save_shows(shows, run_date):
@@ -79,15 +92,17 @@ def save_shows(shows, run_date):
             conn.execute("""
                 INSERT OR IGNORE INTO shows
                     (run_date, date, weekday, time, channel, title, href,
-                     Country, Year, Genre, Rating, Description, Quote, Cast, Crew)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     Country, Year, Genre, Rating, Description, Quote, Cast, Crew,
+                     start_utc, end_utc)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 run_date,
                 s.get("date", ""), s.get("weekday", ""), s.get("time", ""),
-                s.get("channel", ""), s.get("title", ""), s.get("href", ""),
+                s.get("channel", ""), s.get("title", ""), s.get("href", "") or "",
                 s.get("Country", ""), s.get("Year", ""), s.get("Genre", ""),
                 s.get("Rating", ""), s.get("Description", ""), s.get("Quote", ""),
                 s.get("Cast", ""), s.get("Crew", ""),
+                s.get("start_utc", ""), s.get("end_utc", ""),
             ))
 
 
@@ -118,7 +133,7 @@ def get_run_shows_with_scores(run_date):
         rows = conn.execute("""
             SELECT sh.*, sc.slot, sc.final_score, sc.rank_in_group, sc.is_must_watch
             FROM shows sh
-            LEFT JOIN scores sc ON sh.id = sc.show_id AND sc.run_date = sh.run_date
+            JOIN scores sc ON sh.id = sc.show_id AND sc.run_date = sh.run_date
             WHERE sh.run_date = ?
         """, (run_date,)).fetchall()
         return [dict(r) for r in rows]
@@ -179,9 +194,34 @@ def get_training_stats():
         return total, selected
 
 
+def clear_run(run_date: str) -> int:
+    """Drop the stored schedule and scores for one run date, so it can be recollected.
+
+    Only ever touches the given run date. Selections, training rows and every other
+    run are left alone.
+
+    Returns:
+        How many show rows were removed.
+    """
+    with _conn() as conn:
+        n = conn.execute("SELECT COUNT(*) FROM shows WHERE run_date = ?", (run_date,)).fetchone()[0]
+        conn.execute("DELETE FROM scores WHERE run_date = ?", (run_date,))
+        conn.execute("DELETE FROM shows WHERE run_date = ?", (run_date,))
+        return n
+
+
+def last_scored_run_date() -> str | None:
+    """The most recent run_date that produced scores, i.e. the last successful run."""
+    with _conn() as conn:
+        row = conn.execute("SELECT MAX(run_date) FROM scores").fetchone()
+        return row[0] if row and row[0] else None
+
+
 def get_titles_from_previous_runs(run_date: str) -> set:
     with _conn() as conn:
-        rows = conn.execute(
-            "SELECT DISTINCT title FROM shows WHERE run_date < ?", (run_date,)
-        ).fetchall()
+        rows = conn.execute("""
+            SELECT DISTINCT sh.title
+            FROM shows sh JOIN scores sc ON sh.id = sc.show_id
+            WHERE sh.run_date < ?
+        """, (run_date,)).fetchall()
         return {r["title"] for r in rows}

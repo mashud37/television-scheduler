@@ -6,12 +6,17 @@
 #
 # Override the path at runtime via the RANKER_PREFS_PATH env var. The legacy
 # CONFIG_PATH env var (used to point at a JSON file) is still honoured for
-# backwards compatibility — the loader picks parser by file extension.
+# backwards compatibility: the loader picks parser by file extension.
 
 # ── channel_prior ─────────────────────────────────────────────────────────────
 # Map channel name -> score. Higher score = stronger preference.
 # Negative values penalise; use a large negative (e.g. -100) to effectively
 # hide a channel from rankings. Channels not listed get `default_channel_score`.
+#
+# Names must match the canonical channel names in tvsched/sources/channels.py
+# exactly. A name that does not match falls back to default_channel_score and
+# silently loses the strongest ranking signal, so the job logs any channel it
+# collects that has no weight here.
 channel_prior:
   ZDFneo: 3.0
   ARD: 2.0
@@ -26,14 +31,13 @@ channel_prior:
   3sat: 1.0
   MDR: 1.0
   WDR: 1.0
+  Radio Bremen: 1.0
+  ZDFinfo: 1.0
   # Heavy negatives = effectively hidden from results.
-  ORF 1: -100.0
-  ORF 2: -100.0
-  ORF III: -100.0
-  SRF 1: -100.0
-  SRF zwei: -100.0
   ARD-alpha: -100.0
   PHOENIX: -100.0
+  tagesschau24: -100.0
+  KiKA: -100.0
 
 # Score used when a channel isn't in channel_prior.
 default_channel_score: 1.0
@@ -59,7 +63,7 @@ component_weights:
 # ── time slots (minutes since midnight) ──────────────────────────────────────
 # Three boundaries define two "viewing slots": early (early_start..late_start)
 # and late (late_start..late_end). Anything outside both is bucketed as "night".
-# Defaults in the example: 20:15 / 21:35 / 23:00 — German prime-time pattern.
+# Defaults in the example: 20:15 / 21:35 / 23:00 (German prime-time pattern).
 early_start_min: 1215   # 20:15
 late_start_min:  1295   # 21:35
 late_end_min:    1380   # 23:00

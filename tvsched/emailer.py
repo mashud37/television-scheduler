@@ -4,7 +4,6 @@ from collections import defaultdict
 from datetime import date, datetime, timedelta
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from typing import List, Dict
 
 
 def _parse_show_date(run_date: str, date_str: str) -> date:
@@ -42,12 +41,13 @@ def _send(msg):
     print(f"Email sent: {msg['Subject']}")
 
 
-def send_notification_email(run_date: str, scored_shows: List[Dict], access_token: str):
+def send_notification_email(run_date: str, scored_shows: list[dict], access_token: str,
+                            warnings: list[str] = None):
     base_url = os.environ["BASE_URL"]
     url = f"{base_url}/run/{run_date}?token={access_token}"
     total = len(scored_shows)
 
-    by_date: Dict[str, List] = defaultdict(list)
+    by_date: dict[str, list] = defaultdict(list)
     for s in scored_shows:
         by_date[s.get("date", "")].append(s)
 
@@ -56,20 +56,56 @@ def send_notification_email(run_date: str, scored_shows: List[Dict], access_toke
         f"  {(by_date[d][0].get('weekday', '') + ' ' + d).strip()}: {len(by_date[d])}"
         for d in ordered_dates
     )
-    body = f"Shows found for the coming two weeks:\n\n{date_lines}\n\n{url}"
+
+    banner = ""
+    if warnings:
+        banner = "INCOMPLETE RUN\n" + "".join(f"  - {w}\n" for w in warnings) + "\n"
+
+    body = f"{banner}Shows found for the coming days:\n\n{date_lines}\n\n{url}"
 
     msg = MIMEText(body, "plain")
-    msg["Subject"] = f"TV Guide — {run_date} ({total})"
+    flag = " [partial]" if warnings else ""
+    msg["Subject"] = f"TV Guide{flag} - {run_date} ({total})"
     _send(msg)
 
 
-def send_selection_email(run_date: str, selected_shows: List[Dict], ics_content: str):
+def send_failure_email(run_date: str, stage: str, error: BaseException, log_url: str = ""):
+    """Report a failed scheduled run.
+
+    Deliberately depends on nothing but the SMTP settings, so that it still works when
+    the database, the model, the sources or BASE_URL are the thing that broke.
+
+    Args:
+        run_date: The run that failed.
+        stage: Human-readable name of the step that raised.
+        error: The exception that ended the run.
+        log_url: Optional Cloud Logging deep link.
+
+    Raises:
+        Exception: Propagates SMTP failures so the caller can log them loudly.
+    """
+    lines = [
+        f"The TV scheduler run for {run_date} failed and produced no guide.",
+        "",
+        f"Stage:  {stage}",
+        f"Error:  {type(error).__name__}: {error}",
+    ]
+    if log_url:
+        lines += ["", f"Logs:   {log_url}"]
+    lines += ["", "The next scheduled run will retry automatically."]
+
+    msg = MIMEText("\n".join(lines), "plain")
+    msg["Subject"] = f"TV Guide FAILED - {run_date} ({stage})"
+    _send(msg)
+
+
+def send_selection_email(run_date: str, selected_shows: list[dict], ics_content: str):
     if not selected_shows:
         return
 
     lines = []
 
-    by_date: Dict[str, List] = defaultdict(list)
+    by_date: dict[str, list] = defaultdict(list)
     for s in selected_shows:
         by_date[s.get("date", "")].append(s)
 

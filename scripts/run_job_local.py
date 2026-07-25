@@ -16,8 +16,11 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "tvsched"))
 
 def main():
     parser = argparse.ArgumentParser(description="Run the TV scheduler job locally.")
-    parser.add_argument("--run-date", help="Use this run_date instead of today (skips scraping if data exists)")
-    parser.add_argument("--skip-email", action="store_true", help="Score and print summary without sending email")
+    parser.add_argument("--run-date",
+                        help="Use this run_date instead of today (reuses stored rows if present)")
+    parser.add_argument("--skip-email", action="store_true",
+                        help="Score and print summary without sending email")
+    parser.add_argument("--days", type=int, default=8, help="Days of schedule to collect (max 8)")
     args = parser.parse_args()
 
     required_vars = ["SECRET_KEY", "ACCESS_TOKEN", "JOB_TOKEN", "BASE_URL",
@@ -28,11 +31,12 @@ def main():
         print("Create a .env file (see env.yaml.example) or export them before running.")
         sys.exit(1)
 
-    from db import init_db, get_run_shows, save_shows, save_scores, get_training_data, get_training_stats
-    from scraper import scrape_tvspielfilm
-    from ranker import load_model, load_config, score_shows
-    from trainer import retrain_and_save, MIN_SELECTED
+    from candidates import select_candidates
+    from db import get_run_shows, get_training_data, get_training_stats, init_db, save_scores, save_shows
     from emailer import send_notification_email
+    from ranker import load_config, load_model, score_shows
+    from sources import collect_schedule
+    from trainer import MIN_SELECTED, retrain_and_save
 
     init_db()
 
@@ -47,17 +51,24 @@ def main():
 
     existing = get_run_shows(run_date)
     if not existing:
-        print("Scraping TVSpielfilm (this may take 10-30 minutes)...")
-        shows = scrape_tvspielfilm()
-        save_shows(shows, run_date)
-        print(f"Saved {len(shows)} shows")
+        result = collect_schedule(days=args.days)
+        save_shows(result.rows, run_date)
+        print(f"Saved {len(result.rows)} rows "
+              f"(sources ok: {', '.join(result.sources_ok) or 'none'}; "
+              f"failed: {result.sources_failed or 'none'})")
     else:
-        print(f"Using {len(existing)} cached shows for {run_date}")
+        print(f"Using {len(existing)} stored rows for {run_date}")
 
-    model = load_model()
     config = load_config()
     shows = get_run_shows(run_date)
-    scored = score_shows(shows, model, config)
+    candidates, stats = select_candidates(shows, config)
+    print(f"Candidates: {stats['candidates']} of {stats['in_slot']} in-slot "
+          f"(from {stats['collected']} collected)")
+    print(f"  dropped: {stats['hidden_channel']} hidden channel, {stats['excluded_genre']} genre, "
+          f"{stats['presented_format']} presented, {stats['not_fiction']} not fiction, "
+          f"{stats['simulcasts_merged']} simulcast")
+
+    scored = score_shows(candidates, load_model(), config)
     save_scores(scored, run_date)
 
     must_watch = [s for s in scored if s.get("is_must_watch")]
