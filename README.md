@@ -145,6 +145,8 @@ The job must either deliver a guide or say why it could not, so four layers sit 
 
 The job logs a heartbeat line every time it wakes, running or skipping. Twice-daily wake-ups give the 23-hour absence window (the Cloud Monitoring maximum) two missed wake-ups of margin, so it signals a real outage rather than timing jitter.
 
+> The heartbeat condition sums across revisions (`crossSeriesReducer: REDUCE_SUM` grouped by `service_name`). Without that, Cloud Monitoring tracks one series per Cloud Run revision, and every deploy raises a false alarm 23 hours later when the retired revision stops emitting.
+
 ## Common failures
 
 - **A source returns 401 or 403**: treated as a credential problem rather than a transient one and never retried. The ZDF client sends a bearer token that is a public constant taken from the broadcaster's own web player; override it with `ZDF_API_KEY` if it ever rotates.
