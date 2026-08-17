@@ -75,66 +75,60 @@ def _row(channel: str, title: str, start: datetime, end: datetime | None, **extr
     return row
 
 
-def _set_if_longer(row: dict, key: str, value: str) -> None:
-    if value and len(value) > len(row.get(key) or ""):
-        row[key] = value
+def _fetch_detail_one(item: tuple[str, dict, dict]) -> dict:
+    source, row, raw = item
+    fetch = zdf.fetch_detail if source == "zdf" else ard.fetch_teaser
+    try:
+        detail = fetch(raw)
+        error = None
+    except Exception as e:
+        detail = {}
+        error = e
+    return {"item": item, "detail": detail, "error": error}
 
 
-def _apply_zdf_detail(row: dict, detail: dict) -> None:
-    row["Cast"] = zdf.format_cast(detail) or row["Cast"]
-    row["Crew"] = zdf.format_crew(detail) or row["Crew"]
-    for src, dst in (("year", "Year"), ("country", "Country"), ("genre", "Genre")):
-        value = _clean(detail.get(src))
-        if value:
-            row[dst] = value
-    _set_if_longer(row, "Description", _clean(detail.get("text")))
-    row["href"] = detail.get(zdf.SHARING_URL_KEY) or zdf.search_url(row["title"], row["channel"])
-
-
-def _apply_ard_detail(row: dict, teaser: dict) -> None:
-    row["Cast"] = ard.format_cast(teaser) or row["Cast"]
-    row["Crew"] = ard.format_crew(teaser) or row["Crew"]
-    grouping = (teaser.get("grouping") or {}).get("title")
-    if grouping and not row["Genre"]:
-        row["Genre"] = _clean(grouping)
-    _set_if_longer(row, "Description", _clean(teaser.get("synopsis")))
-    if not row["href"]:
-        row["href"] = ard.search_url(row["title"])
-
-
-DETAIL_HANDLERS = {
-    "zdf": (zdf.fetch_detail, _apply_zdf_detail),
-    "ard": (ard.fetch_teaser, _apply_ard_detail),
-}
-
-
-def _apply_details(pending: list[tuple[str, dict, dict]], workers: int, log) -> tuple[int, int]:
+def _fetch_details(pending: list[tuple[str, dict, dict]], workers: int, log) -> dict:
+    """Fetch the detail record for each pending broadcast and copy its fields onto the row."""
     if not pending:
-        return 0, 0
-
-    def one(item):
-        source, row, raw = item
-        fetch, _ = DETAIL_HANDLERS[source]
-        try:
-            return item, fetch(raw), None
-        except Exception as e:
-            return item, {}, e
+        return {"attempted": 0, "failed": 0}
 
     failed = 0
     total = len(pending)
     log(f"  fetching {total} programme details ({workers} workers)")
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        for done, ((source, row, _raw), detail, err) in enumerate(pool.map(one, pending), start=1):
+        outcomes = enumerate(pool.map(_fetch_detail_one, pending), start=1)
+        for done, outcome in outcomes:
+            source, row, _raw = outcome["item"]
+            detail = outcome["detail"]
+            err = outcome["error"]
             if done % 200 == 0 or done == total:
                 log(f"  [{done}/{total}] details")
             if err is not None:
                 failed += 1
                 continue
-            DETAIL_HANDLERS[source][1](row, detail)
-    return total, failed
+
+            if source == "zdf":
+                row["Cast"] = zdf.format_cast(detail) or row["Cast"]
+                row["Crew"] = zdf.format_crew(detail) or row["Crew"]
+                row["Year"] = _clean(detail.get("year")) or row["Year"]
+                row["Country"] = _clean(detail.get("country")) or row["Country"]
+                row["Genre"] = _clean(detail.get("genre")) or row["Genre"]
+                row["href"] = detail.get(zdf.SHARING_URL_KEY) or zdf.search_url(row["title"], row["channel"])
+                description = _clean(detail.get("text"))
+            else:
+                row["Cast"] = ard.format_cast(detail) or row["Cast"]
+                row["Crew"] = ard.format_crew(detail) or row["Crew"]
+                row["Genre"] = row["Genre"] or _clean((detail.get("grouping") or {}).get("title"))
+                row["href"] = row["href"] or ard.search_url(row["title"])
+                description = _clean(detail.get("synopsis"))
+
+            if len(description) > len(row["Description"]):
+                row["Description"] = description
+
+    return {"attempted": total, "failed": failed}
 
 
-def _collect_zdf(start: datetime, end: datetime, log) -> tuple[list[dict], list[tuple]]:
+def _collect_zdf(start: datetime, end: datetime, log) -> dict:
     rows: list[dict] = []
     pending: list[tuple] = []
     total = len(ZDF_CHANNELS)
@@ -156,10 +150,10 @@ def _collect_zdf(start: datetime, end: datetime, log) -> tuple[list[dict], list[
             rows.append(row)
             if _in_detail_window(begin):
                 pending.append(("zdf", row, b))
-    return rows, pending
+    return {"rows": rows, "pending": pending}
 
 
-def _collect_ard(first_day: date, days: int, log) -> tuple[list[dict], list[tuple]]:
+def _collect_ard(first_day: date, days: int, log) -> dict:
     rows: list[dict] = []
     pending: list[tuple] = []
     wanted = {c.api_id for c in ARD_CHANNELS}
@@ -170,8 +164,9 @@ def _collect_ard(first_day: date, days: int, log) -> tuple[list[dict], list[tupl
             if api_id not in wanted:
                 continue
             begin = _parse_dt(entry.get("broadcastedOn"))
-            raw_title, extras = ard.describe(entry)
-            title = _clean(raw_title)
+            described = ard.describe(entry)
+            title = _clean(described["title"])
+            extras = described["extras"]
             if not begin or not title:
                 continue
             row = _row(
@@ -183,7 +178,7 @@ def _collect_ard(first_day: date, days: int, log) -> tuple[list[dict], list[tupl
             rows.append(row)
             if _in_detail_window(begin):
                 pending.append(("ard", row, entry))
-    return rows, pending
+    return {"rows": rows, "pending": pending}
 
 
 def collect_schedule(days: int = DEFAULT_DAYS, workers: int = DEFAULT_WORKERS, log=print) -> CollectResult:
@@ -213,7 +208,8 @@ def collect_schedule(days: int = DEFAULT_DAYS, workers: int = DEFAULT_WORKERS, l
 
     log(f"Collecting {days} days from ZDF API (ZDF family, 3sat, phoenix, ARTE)")
     try:
-        rows, todo = _collect_zdf(start, start + timedelta(days=days), log)
+        collected = _collect_zdf(start, start + timedelta(days=days), log)
+        rows, todo = collected["rows"], collected["pending"]
         result.rows.extend(rows)
         pending.extend(todo)
         result.sources_ok.append("zdf")
@@ -224,7 +220,8 @@ def collect_schedule(days: int = DEFAULT_DAYS, workers: int = DEFAULT_WORKERS, l
 
     log(f"Collecting {days} days from ARD API (Das Erste and third channels)")
     try:
-        rows, todo = _collect_ard(now.date(), days, log)
+        collected = _collect_ard(now.date(), days, log)
+        rows, todo = collected["rows"], collected["pending"]
         result.rows.extend(rows)
         pending.extend(todo)
         result.sources_ok.append("ard")
@@ -239,5 +236,7 @@ def collect_schedule(days: int = DEFAULT_DAYS, workers: int = DEFAULT_WORKERS, l
             + "; ".join(f"{k}: {v}" for k, v in result.sources_failed.items())
         )
 
-    result.detail_attempted, result.detail_failed = _apply_details(pending, workers, log)
+    detail_result = _fetch_details(pending, workers, log)
+    result.detail_attempted = detail_result["attempted"]
+    result.detail_failed = detail_result["failed"]
     return result

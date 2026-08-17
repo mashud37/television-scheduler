@@ -19,7 +19,10 @@ def _flatten(node) -> list[dict]:
     if isinstance(node, dict):
         return [node]
     if isinstance(node, list):
-        return [item for child in node for item in _flatten(child)]
+        items = []
+        for child in node:
+            items.extend(_flatten(child))
+        return items
     return []
 
 
@@ -42,7 +45,7 @@ def fetch_day(day: date) -> list[tuple[str, dict]]:
     return out
 
 
-def describe(entry: dict) -> tuple[str, dict]:
+def describe(entry: dict) -> dict:
     """Split an ARD listing entry into a clean title and its production metadata.
 
     ARD has no year, country or genre fields, but it appends them to the subline as
@@ -54,8 +57,8 @@ def describe(entry: dict) -> tuple[str, dict]:
         entry: A raw listing entry.
 
     Returns:
-        (title, extras) where extras holds any of Genre, Country and Year that were
-        recovered, and is empty when the subline did not carry them.
+        {"title": str, "extras": dict} where extras holds any of Genre, Country and
+        Year that were recovered, and is empty when the subline did not carry them.
     """
     core = (entry.get("coreTitle") or entry.get("title") or "").strip()
     subline = (entry.get("coreSubline") or entry.get("subline") or "").strip()
@@ -68,8 +71,8 @@ def describe(entry: dict) -> tuple[str, dict]:
         subline = subline[: match.start()].strip(" -")
 
     if subline and subline.lower() != core.lower():
-        return f"{core} - {subline}", extras
-    return core, extras
+        return {"title": f"{core} - {subline}", "extras": extras}
+    return {"title": core, "extras": extras}
 
 
 def search_url(title: str) -> str:

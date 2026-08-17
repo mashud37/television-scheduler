@@ -13,19 +13,6 @@ MODEL_PATH = os.environ.get("MODEL_PATH", "/mnt/data/models/tv_component_models.
 MIN_SELECTED = 5
 
 
-def _build_model() -> Pipeline:
-    return Pipeline([
-        ("tfidf", TfidfVectorizer(
-            max_features=30000,
-            ngram_range=(1, 2),
-            min_df=1,
-            strip_accents="unicode",
-            sublinear_tf=True,
-        )),
-        ("ridge", Ridge(alpha=3.0, random_state=0)),
-    ])
-
-
 def retrain_and_save(training_rows: list[dict]) -> bool:
     n_selected = sum(1 for r in training_rows if int(r.get("selected", 0)) == 1)
     if n_selected < MIN_SELECTED:
@@ -49,7 +36,16 @@ def retrain_and_save(training_rows: list[dict]) -> bool:
     models: dict = {}
     for db_col, model_key in field_map.items():
         col_data = df[db_col].fillna("").astype(str) if db_col in df.columns else pd.Series([""] * len(df))
-        m = _build_model()
+        m = Pipeline([
+            ("tfidf", TfidfVectorizer(
+                max_features=30000,
+                ngram_range=(1, 2),
+                min_df=1,
+                strip_accents="unicode",
+                sublinear_tf=True,
+            )),
+            ("ridge", Ridge(alpha=3.0, random_state=0)),
+        ])
         m.fit(col_data, y)
         models[model_key] = m
 

@@ -4,6 +4,67 @@ from contextlib import contextmanager
 
 DB_PATH = os.environ.get("DB_PATH", "data/tv_scheduler.db")
 
+SHOW_COLUMNS_ADDED_LATER = ("start_utc", "end_utc")
+
+SCHEMA_SQL = """
+    CREATE TABLE IF NOT EXISTS shows (
+        id INTEGER PRIMARY KEY,
+        run_date TEXT,
+        date TEXT,
+        weekday TEXT,
+        time TEXT,
+        channel TEXT,
+        title TEXT,
+        href TEXT,
+        Country TEXT DEFAULT '',
+        Year TEXT DEFAULT '',
+        Genre TEXT DEFAULT '',
+        Rating TEXT DEFAULT '',
+        Description TEXT DEFAULT '',
+        Quote TEXT DEFAULT '',
+        Cast TEXT DEFAULT '',
+        Crew TEXT DEFAULT '',
+        UNIQUE(run_date, date, time, channel, title)
+    );
+    CREATE TABLE IF NOT EXISTS scores (
+        id INTEGER PRIMARY KEY,
+        show_id INTEGER REFERENCES shows(id),
+        run_date TEXT,
+        slot TEXT,
+        final_score REAL,
+        rank_in_group INTEGER,
+        is_must_watch INTEGER,
+        UNIQUE(show_id, run_date)
+    );
+    CREATE TABLE IF NOT EXISTS selections (
+        id INTEGER PRIMARY KEY,
+        show_id INTEGER REFERENCES shows(id),
+        selected INTEGER,
+        run_date TEXT,
+        UNIQUE(show_id, run_date)
+    );
+    CREATE TABLE IF NOT EXISTS sessions (
+        run_date TEXT PRIMARY KEY,
+        completed_at TEXT
+    );
+    CREATE TABLE IF NOT EXISTS training (
+        id INTEGER PRIMARY KEY,
+        title TEXT,
+        description TEXT,
+        "cast" TEXT,
+        crew TEXT,
+        channel TEXT,
+        selected INTEGER,
+        run_date TEXT
+    );
+"""
+
+INDEX_SQL = """
+    CREATE INDEX IF NOT EXISTS idx_shows_run_date ON shows(run_date);
+    CREATE INDEX IF NOT EXISTS idx_scores_run_date ON scores(run_date);
+    CREATE INDEX IF NOT EXISTS idx_selections_run_date ON selections(run_date);
+"""
+
 
 @contextmanager
 def _conn():
@@ -19,71 +80,12 @@ def _conn():
 def init_db():
     os.makedirs(os.path.dirname(DB_PATH) or ".", exist_ok=True)
     with _conn() as conn:
-        conn.executescript("""
-            CREATE TABLE IF NOT EXISTS shows (
-                id INTEGER PRIMARY KEY,
-                run_date TEXT,
-                date TEXT,
-                weekday TEXT,
-                time TEXT,
-                channel TEXT,
-                title TEXT,
-                href TEXT,
-                Country TEXT DEFAULT '',
-                Year TEXT DEFAULT '',
-                Genre TEXT DEFAULT '',
-                Rating TEXT DEFAULT '',
-                Description TEXT DEFAULT '',
-                Quote TEXT DEFAULT '',
-                Cast TEXT DEFAULT '',
-                Crew TEXT DEFAULT '',
-                UNIQUE(run_date, date, time, channel, title)
-            );
-            CREATE TABLE IF NOT EXISTS scores (
-                id INTEGER PRIMARY KEY,
-                show_id INTEGER REFERENCES shows(id),
-                run_date TEXT,
-                slot TEXT,
-                final_score REAL,
-                rank_in_group INTEGER,
-                is_must_watch INTEGER,
-                UNIQUE(show_id, run_date)
-            );
-            CREATE TABLE IF NOT EXISTS selections (
-                id INTEGER PRIMARY KEY,
-                show_id INTEGER REFERENCES shows(id),
-                selected INTEGER,
-                run_date TEXT,
-                UNIQUE(show_id, run_date)
-            );
-            CREATE TABLE IF NOT EXISTS sessions (
-                run_date TEXT PRIMARY KEY,
-                completed_at TEXT
-            );
-            CREATE TABLE IF NOT EXISTS training (
-                id INTEGER PRIMARY KEY,
-                title TEXT,
-                description TEXT,
-                "cast" TEXT,
-                crew TEXT,
-                channel TEXT,
-                selected INTEGER,
-                run_date TEXT
-            );
-        """)
-        _migrate(conn)
-
-
-def _migrate(conn):
-    existing = {r[1] for r in conn.execute("PRAGMA table_info(shows)")}
-    for column in ("start_utc", "end_utc"):
-        if column not in existing:
-            conn.execute(f"ALTER TABLE shows ADD COLUMN {column} TEXT DEFAULT ''")
-    conn.executescript("""
-        CREATE INDEX IF NOT EXISTS idx_shows_run_date ON shows(run_date);
-        CREATE INDEX IF NOT EXISTS idx_scores_run_date ON scores(run_date);
-        CREATE INDEX IF NOT EXISTS idx_selections_run_date ON selections(run_date);
-    """)
+        conn.executescript(SCHEMA_SQL)
+        existing = {r[1] for r in conn.execute("PRAGMA table_info(shows)")}
+        for column in SHOW_COLUMNS_ADDED_LATER:
+            if column not in existing:
+                conn.execute(f"ALTER TABLE shows ADD COLUMN {column} TEXT DEFAULT ''")
+        conn.executescript(INDEX_SQL)
 
 
 def save_shows(shows, run_date):
@@ -97,12 +99,22 @@ def save_shows(shows, run_date):
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 run_date,
-                s.get("date", ""), s.get("weekday", ""), s.get("time", ""),
-                s.get("channel", ""), s.get("title", ""), s.get("href", "") or "",
-                s.get("Country", ""), s.get("Year", ""), s.get("Genre", ""),
-                s.get("Rating", ""), s.get("Description", ""), s.get("Quote", ""),
-                s.get("Cast", ""), s.get("Crew", ""),
-                s.get("start_utc", ""), s.get("end_utc", ""),
+                s.get("date", ""),
+                s.get("weekday", ""),
+                s.get("time", ""),
+                s.get("channel", ""),
+                s.get("title", ""),
+                s.get("href", "") or "",
+                s.get("Country", ""),
+                s.get("Year", ""),
+                s.get("Genre", ""),
+                s.get("Rating", ""),
+                s.get("Description", ""),
+                s.get("Quote", ""),
+                s.get("Cast", ""),
+                s.get("Crew", ""),
+                s.get("start_utc", ""),
+                s.get("end_utc", ""),
             ))
 
 
@@ -121,7 +133,9 @@ def save_scores(scored_shows, run_date):
                     (show_id, run_date, slot, final_score, rank_in_group, is_must_watch)
                 VALUES (?, ?, ?, ?, ?, ?)
             """, (
-                s["id"], run_date, s.get("slot", ""),
+                s["id"],
+                run_date,
+                s.get("slot", ""),
                 float(s.get("final_score") or 0.0),
                 int(s.get("rank_in_group") or 0),
                 int(bool(s.get("is_must_watch", False))),
@@ -171,8 +185,15 @@ def save_session(run_date, selected_ids, all_show_ids):
                     """INSERT INTO training
                        (title, description, "cast", crew, channel, selected, run_date)
                        VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                    (row["title"], row["Description"], row["Cast"], row["Crew"],
-                     row["channel"], sel, run_date),
+                    (
+                        row["title"],
+                        row["Description"],
+                        row["Cast"],
+                        row["Crew"],
+                        row["channel"],
+                        sel,
+                        run_date,
+                    ),
                 )
         conn.execute(
             "INSERT OR REPLACE INTO sessions (run_date, completed_at) VALUES (?, datetime('now'))",
@@ -191,7 +212,7 @@ def get_training_stats():
     with _conn() as conn:
         total = conn.execute("SELECT COUNT(*) FROM training").fetchone()[0]
         selected = conn.execute("SELECT COUNT(*) FROM training WHERE selected = 1").fetchone()[0]
-        return total, selected
+        return {"total": total, "selected": selected}
 
 
 def clear_run(run_date: str) -> int:

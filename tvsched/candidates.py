@@ -10,24 +10,59 @@ HIDDEN_CHANNEL_WEIGHT = -50.0
 # excluded deliberately: they carry crew credits and would otherwise look like
 # produced fiction.
 EXCLUDED_GENRE_MARKERS = (
-    "nachricht", "magazin", "journal", "dokumentation", "dokumentarfilm", "doku",
-    "reportage", "talk", "quiz", "sport", "wetter", "parlament", "gottesdienst",
-    "ratgeber", "kabarett", "verbraucher",
+    "nachricht",
+    "magazin",
+    "journal",
+    "dokumentation",
+    "dokumentarfilm",
+    "doku",
+    "reportage",
+    "talk",
+    "quiz",
+    "sport",
+    "wetter",
+    "parlament",
+    "gottesdienst",
+    "ratgeber",
+    "kabarett",
+    "verbraucher",
 )
 
 # Explicit fiction genres, used only to rescue a film whose cast the API omitted.
 # Deliberately excludes the bare word "film", which broadcasters also apply to
 # documentaries.
 FICTION_GENRE_MARKERS = (
-    "spielfilm", "fernsehfilm", "kurzfilm", "liebesfilm", "abenteuerfilm",
-    "krimi", "thriller", "drama", "komödie", "komodie", "tragikomödie",
-    "serie", "reihe", "sitcom", "western", "science-fiction", "horror",
-    "fantasy", "mystery",
+    "spielfilm",
+    "fernsehfilm",
+    "kurzfilm",
+    "liebesfilm",
+    "abenteuerfilm",
+    "krimi",
+    "thriller",
+    "drama",
+    "komödie",
+    "komodie",
+    "tragikomödie",
+    "serie",
+    "reihe",
+    "sitcom",
+    "western",
+    "science-fiction",
+    "horror",
+    "fantasy",
+    "mystery",
 )
 
 # Crew roles that denote a presented format rather than a produced one.
-PRESENTER_ROLES = ("moderation", "redaktion", "präsentation", "prasentation",
-                   "gast", "kommentar", "reporter")
+PRESENTER_ROLES = (
+    "moderation",
+    "redaktion",
+    "präsentation",
+    "prasentation",
+    "gast",
+    "kommentar",
+    "reporter",
+)
 
 MIN_CANDIDATE_RATIO = 0.08
 MIN_CANDIDATE_COUNT = 25
@@ -42,18 +77,13 @@ def _genre_matches(genre: str, markers: tuple) -> bool:
     return bool(g) and any(m in g for m in markers)
 
 
-def _crew_roles(show: dict) -> list[str]:
+def is_presented_format(show: dict) -> bool:
+    """True when the only credited roles are presentation ones, as on a news bulletin."""
     roles = []
     for entry in (show.get("Crew") or "").split(","):
         role = entry.split(" - ")[0].strip().lower()
         if role:
             roles.append(role)
-    return roles
-
-
-def is_presented_format(show: dict) -> bool:
-    """True when the only credited roles are presentation ones, as on a news bulletin."""
-    roles = _crew_roles(show)
     return bool(roles) and all(any(p in role for p in PRESENTER_ROLES) for role in roles)
 
 
@@ -82,7 +112,7 @@ def _dedupe_simulcasts(shows: list[dict], channel_prior: dict, default: float) -
         (s.get("title"), s.get("start_utc") or (s.get("date"), s.get("time")))) is s]
 
 
-def select_candidates(shows: list[dict], config) -> tuple[list[dict], dict]:
+def select_candidates(shows: list[dict], config) -> dict:
     """Reduce a full schedule to the programmes worth ranking.
 
     Keeps broadcasts that start inside a ranked slot on a channel that is not hidden,
@@ -94,7 +124,8 @@ def select_candidates(shows: list[dict], config) -> tuple[list[dict], dict]:
         config: The loaded RankerConfig, for slot boundaries and channel weights.
 
     Returns:
-        (candidates, stats), where stats reports how many rows each gate removed.
+        {"candidates": list, "stats": dict}, where stats reports how many rows each
+        gate removed.
 
     Raises:
         ThinCandidateSet: If implausibly few candidates survived, which points at
@@ -139,4 +170,4 @@ def select_candidates(shows: list[dict], config) -> tuple[list[dict], dict]:
             "cast and genre metadata look degraded at the source"
         )
 
-    return deduped, stats
+    return {"candidates": deduped, "stats": stats}

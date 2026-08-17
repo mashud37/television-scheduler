@@ -12,7 +12,16 @@ class SourceAuthError(SourceError):
     pass
 
 
-def get_json(url: str, headers: dict | None = None, timeout: int = 30, retries: int = 3) -> dict:
+REQUEST_TIMEOUT_SECONDS = 30
+REQUEST_RETRIES = 3
+
+
+def get_json(
+    url: str,
+    headers: dict | None = None,
+    timeout: int = REQUEST_TIMEOUT_SECONDS,
+    retries: int = REQUEST_RETRIES,
+) -> dict:
     """GET a URL and parse the response as JSON, retrying transient failures.
 
     Args:

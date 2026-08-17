@@ -47,87 +47,6 @@ SLOT_LABELS = {
     "night": "Night",
 }
 
-
-def _date_sort_key(date_str: str) -> int:
-    m = re.match(r"(\d+)\.(\d+)\.", str(date_str))
-    if not m:
-        return 0
-    d, mo = int(m.group(1)), int(m.group(2))
-    return mo * 100 + d
-
-
-def _group_shows(shows: list) -> dict:
-    valid_scores = [s["final_score"] for s in shows if s.get("final_score") is not None]
-    if valid_scores:
-        lo, hi = min(valid_scores), max(valid_scores)
-        rng = (hi - lo) if hi > lo else 1.0
-        for s in shows:
-            fs = s.get("final_score")
-            s["score_pct"] = int(round((fs - lo) / rng * 100)) if fs is not None else None
-    else:
-        for s in shows:
-            s["score_pct"] = None
-
-    raw: dict = {}
-    for show in shows:
-        wd = show.get("weekday") or ""
-        dt = show.get("date") or ""
-        label = f"{wd} {dt}".strip()
-        slot = show.get("slot") or "night"
-        dk = _date_sort_key(dt)
-        raw.setdefault(label, {"key": dk, "slots": {}})
-        raw[label]["slots"].setdefault(slot, []).append(show)
-
-    groups: dict = {}
-    for label in sorted(raw, key=lambda d: raw[d]["key"]):
-        slots = raw[label]["slots"]
-        slot_od: dict = {}
-        for slot in sorted(slots, key=lambda s: SLOT_ORDER.get(s, 99)):
-            slot_od[slot] = sorted(slots[slot], key=lambda s: (s.get("rank_in_group") or 9999))
-        groups[label] = slot_od
-
-    return groups
-
-
-def _build_ics(selected_shows: list) -> str:
-    cal = Calendar()
-    now = datetime.now()
-
-    for s in selected_shows:
-        try:
-            if s.get("start_utc") and s.get("end_utc"):
-                dt_start = datetime.fromisoformat(s["start_utc"])
-                dt_end = datetime.fromisoformat(s["end_utc"])
-            else:
-                date_str = (s.get("date") or "").strip().rstrip(".")
-                time_str = s.get("time") or ""
-                d_parts = date_str.split(".")
-                day, month = int(d_parts[0]), int(d_parts[1])
-                t_parts = time_str.split("-")
-                start_s = t_parts[0].strip()
-                end_s = t_parts[1].strip()
-
-                year = now.year + (1 if month < now.month else 0)
-                base = pd.Timestamp(year=year, month=month, day=day)
-                dt_start = (base + pd.Timedelta(start_s + ":00")).tz_localize("Europe/Berlin")
-                dt_end = (base + pd.Timedelta(end_s + ":00")).tz_localize("Europe/Berlin")
-                if dt_end <= dt_start:
-                    dt_end += pd.Timedelta(days=1)
-
-            e = Event()
-            is_new = str(s.get("Year", "")) == str(now.year)
-            prefix = "NEU: " if is_new else ""
-            e.name = f"{prefix}{s.get('title', '')} / {s.get('channel', '')}"
-            e.begin = getattr(dt_start, "to_pydatetime", lambda: dt_start)()
-            e.end = getattr(dt_end, "to_pydatetime", lambda: dt_end)()
-            e.description = s.get("href") or s.get("Description") or ""
-            cal.events.add(e)
-        except Exception as err:
-            print(f"ICS: skipping '{s.get('title', '?')}': {err}")
-
-    return str(cal)
-
-
 TEMPLATE = """<!DOCTYPE html>
 <html lang="de">
 <head>
@@ -174,7 +93,7 @@ button:hover { background: #1d4ed8; }
 <p class="subtitle">{{ total }} shows &nbsp;&mdash;&nbsp; <a href="/settings" style="color:#6b7280;font-size:0.85rem;">Settings</a></p>
 
 {% if done %}
-<div class="done-banner">Saved — calendar sent.</div>
+<div class="done-banner">Saved, calendar sent.</div>
 {% endif %}
 
 <form method="post" action="/run/{{ run_date }}/select">
@@ -223,7 +142,6 @@ button:hover { background: #1d4ed8; }
 </form>
 </body>
 </html>"""
-
 
 SETTINGS_TEMPLATE = """<!DOCTYPE html>
 <html lang="en">
@@ -276,6 +194,91 @@ button:hover { background: #1d4ed8; }
 <a class="back" href="/">← Back</a>
 </body>
 </html>"""
+
+
+def _to_pydatetime(value):
+    """A plain Python datetime for either a pandas Timestamp or a datetime."""
+    convert = getattr(value, "to_pydatetime", None)
+    if convert is None:
+        return value
+    return convert()
+
+
+def _group_shows(shows: list) -> dict:
+    valid_scores = [s["final_score"] for s in shows if s.get("final_score") is not None]
+    if valid_scores:
+        lo, hi = min(valid_scores), max(valid_scores)
+        rng = (hi - lo) if hi > lo else 1.0
+        for s in shows:
+            fs = s.get("final_score")
+            s["score_pct"] = int(round((fs - lo) / rng * 100)) if fs is not None else None
+    else:
+        for s in shows:
+            s["score_pct"] = None
+
+    raw: dict = {}
+    for show in shows:
+        wd = show.get("weekday") or ""
+        dt = show.get("date") or ""
+        label = f"{wd} {dt}".strip()
+        slot = show.get("slot") or "night"
+        m = re.match(r"(\d+)\.(\d+)\.", str(dt))
+        if m:
+            day, month = int(m.group(1)), int(m.group(2))
+            dk = month * 100 + day
+        else:
+            dk = 0
+        raw.setdefault(label, {"key": dk, "slots": {}})
+        raw[label]["slots"].setdefault(slot, []).append(show)
+
+    groups: dict = {}
+    for label in sorted(raw, key=lambda d: raw[d]["key"]):
+        slots = raw[label]["slots"]
+        slot_od: dict = {}
+        for slot in sorted(slots, key=lambda s: SLOT_ORDER.get(s, 99)):
+            slot_od[slot] = sorted(slots[slot], key=lambda s: (s.get("rank_in_group") or 9999))
+        groups[label] = slot_od
+
+    return groups
+
+
+def _build_ics(selected_shows: list) -> str:
+    cal = Calendar()
+    now = datetime.now()
+
+    for s in selected_shows:
+        try:
+            if s.get("start_utc") and s.get("end_utc"):
+                dt_start = datetime.fromisoformat(s["start_utc"])
+                dt_end = datetime.fromisoformat(s["end_utc"])
+            else:
+                date_str = (s.get("date") or "").strip().rstrip(".")
+                time_str = s.get("time") or ""
+                d_parts = date_str.split(".")
+                day, month = int(d_parts[0]), int(d_parts[1])
+                t_parts = time_str.split("-")
+                start_s = t_parts[0].strip()
+                end_s = t_parts[1].strip()
+
+                year = now.year + (1 if month < now.month else 0)
+                base = pd.Timestamp(year=year, month=month, day=day)
+                dt_start = (base + pd.Timedelta(start_s + ":00")).tz_localize("Europe/Berlin")
+                dt_end = (base + pd.Timedelta(end_s + ":00")).tz_localize("Europe/Berlin")
+                if dt_end <= dt_start:
+                    dt_end += pd.Timedelta(days=1)
+
+            e = Event()
+            is_new = str(s.get("Year", "")) == str(now.year)
+            prefix = "NEU: " if is_new else ""
+            e.name = f"{prefix}{s.get('title', '')} / {s.get('channel', '')}"
+            e.begin = _to_pydatetime(dt_start)
+            e.end = _to_pydatetime(dt_end)
+            e.description = s.get("href") or s.get("Description") or ""
+            cal.events.add(e)
+        except Exception as err:
+            print(f"ICS: skipping '{s.get('title', '?')}': {err}")
+
+    return str(cal)
 
 
 @app.before_request
@@ -363,19 +366,6 @@ def select(run_date):
     return redirect(url_for("show_run", run_date=run_date))
 
 
-def _parse_hhmm(s: str) -> int | None:
-    """'20:15' -> 1215 (minutes since midnight). Returns None if unparseable."""
-    if not s:
-        return None
-    m = re.match(r"^\s*(\d{1,2})[:.](\d{2})\s*$", s)
-    if not m:
-        return None
-    h, mi = int(m.group(1)), int(m.group(2))
-    if not (0 <= h <= 24 and 0 <= mi < 60):
-        return None
-    return h * 60 + mi
-
-
 def _format_hhmm(mins) -> str:
     try:
         mins = int(mins)
@@ -399,10 +389,6 @@ def _parse_channel_prior(text: str) -> dict:
     return out
 
 
-def _format_channel_prior(prior: dict) -> str:
-    return "\n".join(f"{k}: {v}" for k, v in (prior or {}).items())
-
-
 @app.route("/settings", methods=["GET", "POST"])
 def settings():
     from ranker import load_config, save_config
@@ -418,12 +404,18 @@ def settings():
         cfg.channel_prior = _parse_channel_prior(request.form.get("channel_prior", ""))
         for field_name, form_name in (
             ("early_start_min", "early_start"),
-            ("late_start_min",  "late_start"),
-            ("late_end_min",    "late_end"),
+            ("late_start_min", "late_start"),
+            ("late_end_min", "late_end"),
         ):
-            parsed = _parse_hhmm(request.form.get(form_name, ""))
-            if parsed is not None:
-                setattr(cfg, field_name, parsed)
+            raw_value = request.form.get(form_name, "")
+            match = re.match(r"^\s*(\d{1,2})[:.](\d{2})\s*$", raw_value) if raw_value else None
+            if not match:
+                continue
+            hours = int(match.group(1))
+            minutes = int(match.group(2))
+            if not (0 <= hours <= 24 and 0 <= minutes < 60):
+                continue
+            setattr(cfg, field_name, hours * 60 + minutes)
         try:
             save_config(cfg)
             saved = True
@@ -435,7 +427,7 @@ def settings():
     return render_template_string(
         SETTINGS_TEMPLATE,
         keywords="\n".join(cfg.must_watch_keywords),
-        channel_prior=_format_channel_prior(cfg.channel_prior),
+        channel_prior="\n".join(f"{k}: {v}" for k, v in (cfg.channel_prior or {}).items()),
         early_start=_format_hhmm(cfg.early_start_min),
         late_start=_format_hhmm(cfg.late_start_min),
         late_end=_format_hhmm(cfg.late_end_min),

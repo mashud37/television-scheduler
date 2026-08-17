@@ -1,3 +1,4 @@
+import copy
 import os
 import smtplib
 from collections import defaultdict
@@ -20,25 +21,19 @@ def _parse_show_date(run_date: str, date_str: str) -> date:
     return candidate
 
 
-def _smtp_config():
-    return {
-        "host": os.environ["SMTP_HOST"],
-        "port": int(os.environ.get("SMTP_PORT", "587")),
-        "user": os.environ["SMTP_USER"],
-        "password": os.environ["SMTP_PASS"],
-        "to": os.environ["EMAIL_TO"],
-    }
-
-
 def _send(msg):
-    cfg = _smtp_config()
-    msg["From"] = cfg["user"]
-    msg["To"] = cfg["to"]
-    with smtplib.SMTP(cfg["host"], cfg["port"]) as server:
+    host = os.environ["SMTP_HOST"]
+    port = int(os.environ.get("SMTP_PORT", "587"))
+    user = os.environ["SMTP_USER"]
+    password = os.environ["SMTP_PASS"]
+    outgoing = copy.deepcopy(msg)
+    outgoing["From"] = user
+    outgoing["To"] = os.environ["EMAIL_TO"]
+    with smtplib.SMTP(host, port) as server:
         server.starttls()
-        server.login(cfg["user"], cfg["password"])
-        server.send_message(msg)
-    print(f"Email sent: {msg['Subject']}")
+        server.login(user, password)
+        server.send_message(outgoing)
+    print(f"Email sent: {outgoing['Subject']}")
 
 
 def send_notification_email(run_date: str, scored_shows: list[dict], access_token: str,
@@ -124,7 +119,7 @@ def send_selection_email(run_date: str, selected_shows: list[dict], ics_content:
     body = "\n".join(lines)
 
     msg = MIMEMultipart("mixed")
-    msg["Subject"] = f"TV Selection — {run_date} ({len(selected_shows)})"
+    msg["Subject"] = f"TV Selection: {run_date} ({len(selected_shows)})"
     msg.attach(MIMEText(body, "plain"))
 
     part = MIMEText(ics_content, "calendar", "utf-8")

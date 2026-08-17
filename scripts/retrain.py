@@ -23,7 +23,8 @@ def main():
     from trainer import MIN_SELECTED, retrain_and_save
 
     init_db()
-    total, n_selected = get_training_stats()
+    training_stats = get_training_stats()
+    total, n_selected = training_stats["total"], training_stats["selected"]
     print(f"Training table: {total} rows, {n_selected} selected")
 
     if n_selected < MIN_SELECTED:
@@ -35,7 +36,7 @@ def main():
     success = retrain_and_save(training_rows)
 
     if not success:
-        print("Retraining failed — check output above.")
+        print("Retraining failed, check output above.")
         sys.exit(1)
 
     print(f"Model saved to: {args.out}")
@@ -47,7 +48,7 @@ def main():
             check=False,
         ).returncode
         if ret != 0:
-            print("Upload failed — check gcloud auth and bucket permissions.")
+            print("Upload failed, check gcloud auth and bucket permissions.")
             sys.exit(1)
         print("Upload complete.")
 
