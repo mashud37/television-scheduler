@@ -25,6 +25,7 @@ from flask import (
     url_for,
 )
 from ics import Calendar, Event
+from ranker import load_config, save_config
 from trainer import retrain_and_save
 
 init_db()
@@ -41,11 +42,6 @@ JOB_TOKEN = os.environ["JOB_TOKEN"]
 RATING_SYMBOLS = {"1": "👍", "2": "👉", "3": "👎"}
 
 SLOT_ORDER = {"early": 0, "late": 1, "night": 2}
-SLOT_LABELS = {
-    "early": "Prime time (20:15–21:35)",
-    "late": "Late night (21:35–23:00)",
-    "night": "Night",
-}
 
 TEMPLATE = """<!DOCTYPE html>
 <html lang="de">
@@ -63,10 +59,12 @@ h2 { font-size: 1.05rem; font-weight: 700; margin: 2rem 0 0.5rem;
 h3 { font-size: 0.78rem; color: #9ca3af; text-transform: uppercase;
      letter-spacing: 0.06em; margin: 0.9rem 0 0.35rem; }
 .show { padding: 0.7rem; margin: 0.35rem 0; border: 1px solid #e5e7eb;
-        border-radius: 6px; display: flex; gap: 0.75rem; align-items: flex-start; }
+        border-radius: 6px; display: flex; gap: 0.75rem; align-items: flex-start;
+        cursor: pointer; }
+.show:hover { border-color: #93c5fd; }
 .show.must { border-color: #2563eb; background: #eff6ff; }
-.show.selected { border-color: #16a34a; background: #f0fdf4; }
-.show.must.selected { border-color: #16a34a; }
+.show.selected, .show:has(input:checked) { border-color: #16a34a; background: #f0fdf4; }
+.show:has(input:disabled) { cursor: default; }
 input[type=checkbox] { width: 18px; height: 18px; flex-shrink: 0; margin-top: 2px; cursor: pointer; }
 .body { flex: 1; min-width: 0; }
 .title { font-weight: 600; font-size: 0.94rem; line-height: 1.4; }
@@ -105,7 +103,7 @@ button:hover { background: #1d4ed8; }
 <h3>{{ slot_labels[slot] }}</h3>
 {% for show in shows %}
 {% set is_sel = show.id in selected_ids %}
-<div class="show{% if show.is_must_watch %} must{% endif %}{% if is_sel %} selected{% endif %}">
+<label class="show{% if show.is_must_watch %} must{% endif %}{% if is_sel %} selected{% endif %}">
   <input type="checkbox" name="selected" value="{{ show.id }}"
     {% if is_sel or (not done and show.is_must_watch) %}checked{% endif %}
     {% if done %}disabled{% endif %}>
@@ -129,7 +127,7 @@ button:hover { background: #1d4ed8; }
   {% if show.score_pct is not none %}
   <div class="score">{{ show.score_pct }}%</div>
   {% endif %}
-</div>
+</label>
 {% endfor %}
 {% endfor %}
 {% endfor %}
@@ -186,7 +184,7 @@ button:hover { background: #1d4ed8; }
   &mdash;
   <input type="text" name="late_start"  value="{{ late_start  }}" placeholder="21:35" style="flex:1;padding:0.45rem;border:1px solid #e5e7eb;border-radius:4px;font-family:monospace">
   &mdash;
-  <input type="text" name="late_end"    value="{{ late_end    }}" placeholder="23:00" style="flex:1;padding:0.45rem;border:1px solid #e5e7eb;border-radius:4px;font-family:monospace">
+  <input type="text" name="late_end"    value="{{ late_end    }}" placeholder="23:15" style="flex:1;padding:0.45rem;border:1px solid #e5e7eb;border-radius:4px;font-family:monospace">
 </div>
 
 <button type="submit">Save</button>
@@ -202,6 +200,18 @@ def _to_pydatetime(value):
     if convert is None:
         return value
     return convert()
+
+
+def _slot_labels(config) -> dict:
+    """Slot headings named after the boundaries the ranker actually used."""
+    early = _format_hhmm(config.early_start_min)
+    late = _format_hhmm(config.late_start_min)
+    end = _format_hhmm(config.late_end_min)
+    return {
+        "early": f"Prime time ({early}–{late})",
+        "late": f"Late night ({late}–{end})",
+        "night": "Night",
+    }
 
 
 def _group_shows(shows: list) -> dict:
@@ -331,7 +341,7 @@ def show_run(run_date):
         done=done,
         selected_ids=selected_ids,
         csrf_token=csrf_token,
-        slot_labels=SLOT_LABELS,
+        slot_labels=_slot_labels(load_config()),
         rating_symbols=RATING_SYMBOLS,
     )
 
@@ -391,7 +401,6 @@ def _parse_channel_prior(text: str) -> dict:
 
 @app.route("/settings", methods=["GET", "POST"])
 def settings():
-    from ranker import load_config, save_config
     saved = False
 
     if request.method == "POST":
