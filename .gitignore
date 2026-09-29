@@ -27,3 +27,4 @@ data/
 # The bundled model is large and rebuilt by scripts/retrain.py.
 # Copy it manually before building, see README.md "Step 2: Copy the pre-trained model".
 assets/models/*.joblib
+.claude/
