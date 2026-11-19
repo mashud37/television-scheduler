@@ -112,7 +112,7 @@ The full schedule is stored, but only a slice of it is scored and shown. A broad
 | Format | not a presented format, meaning the only credited roles are moderation or editorial |
 | Fiction | has a **cast**, or failing that an explicitly fictional genre |
 
-**A cast is the sharp signal.** Drama, films and series credit actors; documentaries and news credit a crew and a presenter but no cast. Filtering on cast rather than on credits generally is what separates a film from a documentary, and it lifts cast coverage on the ranked set to 100%.
+**A cast is the sharp signal.** Drama, films and series credit actors; documentaries and news credit a crew and a presenter but no cast. Filtering on cast rather than on credits generally is what separates a film from a documentary, and it lifts cast coverage on the ranked set to 100%. In-slot broadcasts the filter set aside as not fiction are listed, collapsed, under the ranked ones on the run page, where any of them can be ticked and saved with the rest.
 
 Finally, simulcasts are collapsed. Radio Bremen carries most of NDR's evening schedule and the regional channels share films, so the same broadcast can appear on several channels at the same minute; the copy on the most preferred channel wins.
 

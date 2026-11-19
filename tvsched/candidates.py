@@ -94,6 +94,56 @@ def is_fiction(show: dict) -> bool:
     return _genre_matches(show.get("Genre", ""), FICTION_GENRE_MARKERS)
 
 
+def slot_for(show: dict, config) -> str:
+    """The viewing slot a show starts in: early, late or night."""
+    start = parse_start_min(show.get("time", ""))
+    return slot_of(start, config.early_start_min, config.late_start_min, config.late_end_min)
+
+
+def drop_reason(show: dict, prior: dict, default: float) -> str:
+    """Name the gate that removes a show, or return an empty string when it is kept."""
+    if prior.get(show.get("channel"), default) <= HIDDEN_CHANNEL_WEIGHT:
+        return "hidden_channel"
+    if _genre_matches(show.get("Genre", ""), EXCLUDED_GENRE_MARKERS):
+        return "excluded_genre"
+    if is_presented_format(show) and not (show.get("Cast") or "").strip():
+        return "presented_format"
+    if not is_fiction(show):
+        return "not_fiction"
+    return ""
+
+
+def filtered_out(shows: list[dict], scored: list[dict], config) -> list[dict]:
+    """In-slot shows the filter set aside only because they did not look like fiction.
+
+    Hidden channels and excluded genres stay out, and so does any copy of a scored
+    show on another channel. A show whose programme details failed to load lands here,
+    so it can still be picked by hand.
+
+    Args:
+        shows: Every stored row for the run.
+        scored: The rows that were scored for the run.
+        config: The loaded RankerConfig, for slot boundaries and channel weights.
+
+    Returns:
+        The set-aside rows, each with its "slot" filled in.
+    """
+    prior, default = config.channel_prior or {}, config.default_channel_score
+    scored_ids = {s["id"] for s in scored}
+    scored_keys = {(s.get("title"), s.get("start_utc")) for s in scored}
+
+    result = []
+    for show in shows:
+        if show["id"] in scored_ids or (show.get("title"), show.get("start_utc")) in scored_keys:
+            continue
+        slot = slot_for(show, config)
+        if slot not in RANKED_SLOTS:
+            continue
+        if drop_reason(show, prior, default) in ("presented_format", "not_fiction"):
+            result.append({**show, "slot": slot})
+    return result
+
+
 def _dedupe_simulcasts(shows: list[dict], channel_prior: dict, default: float) -> list[dict]:
     """Collapse the same programme carried on several channels at the same moment.
 
@@ -133,23 +183,14 @@ def select_candidates(shows: list[dict], config) -> dict:
     """
     prior, default = config.channel_prior or {}, config.default_channel_score
 
-    in_slot = [
-        s for s in shows
-        if slot_of(parse_start_min(s.get("time", "")), config.early_start_min,
-                   config.late_start_min, config.late_end_min) in RANKED_SLOTS
-    ]
+    in_slot = [s for s in shows if slot_for(s, config) in RANKED_SLOTS]
 
     counts = {"hidden_channel": 0, "excluded_genre": 0, "presented_format": 0, "not_fiction": 0}
     kept = []
     for show in in_slot:
-        if prior.get(show.get("channel"), default) <= HIDDEN_CHANNEL_WEIGHT:
-            counts["hidden_channel"] += 1
-        elif _genre_matches(show.get("Genre", ""), EXCLUDED_GENRE_MARKERS):
-            counts["excluded_genre"] += 1
-        elif is_presented_format(show) and not (show.get("Cast") or "").strip():
-            counts["presented_format"] += 1
-        elif not is_fiction(show):
-            counts["not_fiction"] += 1
+        reason = drop_reason(show, prior, default)
+        if reason:
+            counts[reason] += 1
         else:
             kept.append(show)
 

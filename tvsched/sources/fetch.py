@@ -14,6 +14,7 @@ class SourceAuthError(SourceError):
 
 REQUEST_TIMEOUT_SECONDS = 30
 REQUEST_RETRIES = 3
+MAX_RETRY_AFTER_SECONDS = 30
 
 
 def get_json(
@@ -41,15 +42,19 @@ def get_json(
     last = None
     for attempt in range(1, retries + 1):
         req = urllib.request.Request(url, headers=headers or {})
+        wait = 2 ** attempt
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 return json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
             if e.code in (401, 403):
                 raise SourceAuthError(f"{e.code} {e.reason} for {url}") from e
+            asked = e.headers.get("Retry-After", "")
+            if e.code == 429 and asked.isdigit():
+                wait = min(int(asked), MAX_RETRY_AFTER_SECONDS)
             last = e
         except Exception as e:
             last = e
         if attempt < retries:
-            time.sleep(2 ** (attempt - 1))
+            time.sleep(wait)
     raise SourceError(f"{type(last).__name__}: {last} for {url}")

@@ -1,5 +1,7 @@
 import html
 import re
+import time
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
@@ -13,7 +15,10 @@ ARD_MAX_DAYS = 8
 DEFAULT_DAYS = 8
 DETAIL_FROM_HOUR = 18
 DETAIL_TO_HOUR = 2
-DEFAULT_WORKERS = 12
+ZDF_DETAIL_WORKERS = 4
+ARD_DETAIL_WORKERS = 8
+RETRY_WORKERS = 2
+RETRY_PAUSE_SECONDS = 30
 
 _TAG_RE = re.compile(r"<[^>]+>")
 _WS_RE = re.compile(r"\s+")
@@ -80,52 +85,92 @@ def _fetch_detail_one(item: tuple[str, dict, dict]) -> dict:
     fetch = zdf.fetch_detail if source == "zdf" else ard.fetch_teaser
     try:
         detail = fetch(raw)
-        error = None
+        error = ""
     except Exception as e:
         detail = {}
-        error = e
+        error = f"{type(e).__name__}: {e}".split(" for ")[0]
     return {"item": item, "detail": detail, "error": error}
 
 
-def _fetch_details(pending: list[tuple[str, dict, dict]], workers: int, log) -> dict:
-    """Fetch the detail record for each pending broadcast and copy its fields onto the row."""
-    if not pending:
-        return {"attempted": 0, "failed": 0}
+def _detail_fields(source: str, row: dict, detail: dict) -> dict:
+    """The listing fields of one row, filled in from its fetched detail record."""
+    if source == "zdf":
+        fields = {
+            "Cast": zdf.format_cast(detail) or row["Cast"],
+            "Crew": zdf.format_crew(detail) or row["Crew"],
+            "Year": _clean(detail.get("year")) or row["Year"],
+            "Country": _clean(detail.get("country")) or row["Country"],
+            "Genre": _clean(detail.get("genre")) or row["Genre"],
+            "href": detail.get(zdf.SHARING_URL_KEY) or zdf.search_url(row["title"], row["channel"]),
+        }
+        description = _clean(detail.get("text"))
+    else:
+        fields = {
+            "Cast": ard.format_cast(detail) or row["Cast"],
+            "Crew": ard.format_crew(detail) or row["Crew"],
+            "Genre": row["Genre"] or _clean((detail.get("grouping") or {}).get("title")),
+            "href": row["href"] or ard.search_url(row["title"]),
+        }
+        description = _clean(detail.get("synopsis"))
 
-    failed = 0
+    if len(description) > len(row["Description"]):
+        fields["Description"] = description
+    return fields
+
+
+def _fetch_round(pending: list[tuple], workers: int, label: str, log) -> list[dict]:
+    """Fetch one batch of details in parallel and return the outcomes that failed."""
+    if not pending:
+        return []
     total = len(pending)
-    log(f"  fetching {total} programme details ({workers} workers)")
+    log(f"  {label}: fetching {total} programme details ({workers} workers)")
+    failures = []
     with ThreadPoolExecutor(max_workers=workers) as pool:
         outcomes = enumerate(pool.map(_fetch_detail_one, pending), start=1)
         for done, outcome in outcomes:
-            source, row, _raw = outcome["item"]
-            detail = outcome["detail"]
-            err = outcome["error"]
-            if done % 200 == 0 or done == total:
-                log(f"  [{done}/{total}] details")
-            if err is not None:
-                failed += 1
+            if done % 100 == 0 or done == total:
+                log(f"  {label}: [{done}/{total}] details, {len(failures)} failed so far")
+            if outcome["error"]:
+                failures.append(outcome)
                 continue
+            source, row, _raw = outcome["item"]
+            row.update(_detail_fields(source, row, outcome["detail"]))
+    return failures
 
-            if source == "zdf":
-                row["Cast"] = zdf.format_cast(detail) or row["Cast"]
-                row["Crew"] = zdf.format_crew(detail) or row["Crew"]
-                row["Year"] = _clean(detail.get("year")) or row["Year"]
-                row["Country"] = _clean(detail.get("country")) or row["Country"]
-                row["Genre"] = _clean(detail.get("genre")) or row["Genre"]
-                row["href"] = detail.get(zdf.SHARING_URL_KEY) or zdf.search_url(row["title"], row["channel"])
-                description = _clean(detail.get("text"))
-            else:
-                row["Cast"] = ard.format_cast(detail) or row["Cast"]
-                row["Crew"] = ard.format_crew(detail) or row["Crew"]
-                row["Genre"] = row["Genre"] or _clean((detail.get("grouping") or {}).get("title"))
-                row["href"] = row["href"] or ard.search_url(row["title"])
-                description = _clean(detail.get("synopsis"))
 
-            if len(description) > len(row["Description"]):
-                row["Description"] = description
+def _log_failures(failures: list[dict], log):
+    """Print how many details are still missing, per channel and per error."""
+    if not failures:
+        log("  every programme detail loaded")
+        return
+    by_channel = Counter(outcome["item"][1]["channel"] for outcome in failures)
+    by_error = Counter(outcome["error"] for outcome in failures)
+    log(f"  {len(failures)} programme details still missing after retry")
+    log("  missing by channel: " + ", ".join(f"{name} {n}" for name, n in by_channel.most_common()))
+    for error, n in by_error.most_common(5):
+        log(f"  {n} x {error}")
 
-    return {"attempted": total, "failed": failed}
+
+def _fetch_details(pending: list[tuple], log) -> dict:
+    """Fetch every pending detail, each API with its own pool, then retry failures slowly.
+
+    The ZDF API throttles parallel requests from Cloud Run, so it gets the smaller pool,
+    and whatever fails is tried once more after a pause with fewer workers.
+    """
+    zdf_items = [item for item in pending if item[0] == "zdf"]
+    ard_items = [item for item in pending if item[0] == "ard"]
+    failures = _fetch_round(zdf_items, ZDF_DETAIL_WORKERS, "ZDF", log)
+    failures += _fetch_round(ard_items, ARD_DETAIL_WORKERS, "ARD", log)
+
+    if failures:
+        log(f"  {len(failures)} details failed, retrying in {RETRY_PAUSE_SECONDS}s "
+            f"with {RETRY_WORKERS} workers")
+        time.sleep(RETRY_PAUSE_SECONDS)
+        retry_items = [outcome["item"] for outcome in failures]
+        failures = _fetch_round(retry_items, RETRY_WORKERS, "retry", log)
+
+    _log_failures(failures, log)
+    return {"attempted": len(pending), "failed": len(failures)}
 
 
 def _collect_zdf(start: datetime, end: datetime, log) -> dict:
@@ -181,7 +226,7 @@ def _collect_ard(first_day: date, days: int, log) -> dict:
     return {"rows": rows, "pending": pending}
 
 
-def collect_schedule(days: int = DEFAULT_DAYS, workers: int = DEFAULT_WORKERS, log=print) -> CollectResult:
+def collect_schedule(days: int = DEFAULT_DAYS, log=print) -> CollectResult:
     """Collect the full broadcast schedule from the ARD and ZDF APIs.
 
     Each source is fetched independently so that one failing does not lose the other.
@@ -190,7 +235,6 @@ def collect_schedule(days: int = DEFAULT_DAYS, workers: int = DEFAULT_WORKERS, l
 
     Args:
         days: How many days ahead to collect. Capped at 8 by the ARD API.
-        workers: Parallel workers for detail fetches.
         log: Line logger.
 
     Returns:
@@ -236,7 +280,7 @@ def collect_schedule(days: int = DEFAULT_DAYS, workers: int = DEFAULT_WORKERS, l
             + "; ".join(f"{k}: {v}" for k, v in result.sources_failed.items())
         )
 
-    detail_result = _fetch_details(pending, workers, log)
+    detail_result = _fetch_details(pending, log)
     result.detail_attempted = detail_result["attempted"]
     result.detail_failed = detail_result["failed"]
     return result

@@ -5,7 +5,9 @@ import secrets
 from datetime import datetime
 
 import pandas as pd
+from candidates import filtered_out
 from db import (
+    get_run_shows,
     get_run_shows_with_scores,
     get_session_selections,
     get_titles_from_previous_runs,
@@ -82,6 +84,11 @@ input[type=checkbox] { width: 18px; height: 18px; flex-shrink: 0; margin-top: 2p
 button { background: #2563eb; color: #fff; padding: 0.55rem 1.6rem;
          border: none; border-radius: 4px; font-size: 0.95rem; cursor: pointer; }
 button:hover { background: #1d4ed8; }
+.aside { margin-top: 2.5rem; border-top: 2px solid #e5e7eb; padding-top: 0.8rem; }
+.aside summary { cursor: pointer; font-weight: 700; font-size: 1.05rem; }
+.aside .hint { color: #6b7280; font-size: 0.84rem; margin: 0.4rem 0 0; }
+.show.compact { padding: 0.4rem 0.7rem; margin: 0.2rem 0; }
+.missing { color: #b45309; }
 .done-banner { background: #dcfce7; border: 1px solid #bbf7d0; padding: 0.7rem 1rem;
                border-radius: 4px; margin-bottom: 1rem; font-size: 0.9rem; }
 </style>
@@ -131,6 +138,36 @@ button:hover { background: #1d4ed8; }
 {% endfor %}
 {% endfor %}
 {% endfor %}
+
+{% if aside_total %}
+<details class="aside"{% if aside_open %} open{% endif %}>
+<summary>Filtered out ({{ aside_total }})</summary>
+<p class="hint">In the time slots, but not recognised as fiction. Tick any you want; they are saved and sent with the rest.</p>
+{% for date_label, slots in aside_groups.items() %}
+<h2>{{ date_label }}</h2>
+{% for slot, shows in slots.items() %}
+<h3>{{ slot_labels[slot] }}</h3>
+{% for show in shows %}
+{% set is_sel = show.id in selected_ids %}
+<label class="show compact{% if is_sel %} selected{% endif %}">
+  <input type="checkbox" name="selected" value="{{ show.id }}"
+    {% if is_sel %}checked{% endif %}
+    {% if done %}disabled{% endif %}>
+  <div class="body">
+    <div class="title">{{ show.title }}</div>
+    <div class="meta">
+      {{ show.channel }}
+      &nbsp;|&nbsp; {{ show.time }}
+      {%- if show.Genre %} &nbsp;|&nbsp; {{ show.Genre }}{% else %} &nbsp;|&nbsp; <span class="missing">no details</span>{% endif %}
+      {%- if show.Year %} ({{ show.Year }}){% endif %}
+    </div>
+  </div>
+</label>
+{% endfor %}
+{% endfor %}
+{% endfor %}
+</details>
+{% endif %}
 
 {% if not done %}
 <div class="bar">
@@ -333,15 +370,23 @@ def show_run(run_date):
     csrf_token = session.setdefault("csrf_token", secrets.token_hex(16))
     groups = _group_shows(shows)
 
+    config = load_config()
+    aside = filtered_out(get_run_shows(run_date), shows, config)
+    aside.sort(key=lambda s: s.get("start_utc") or "")
+    aside_open = any(s["id"] in selected_ids for s in aside)
+
     return render_template_string(
         TEMPLATE,
         run_date=run_date,
         total=len(shows),
         groups=groups,
+        aside_groups=_group_shows(aside),
+        aside_total=len(aside),
+        aside_open=aside_open,
         done=done,
         selected_ids=selected_ids,
         csrf_token=csrf_token,
-        slot_labels=_slot_labels(load_config()),
+        slot_labels=_slot_labels(config),
         rating_symbols=RATING_SYMBOLS,
     )
 
@@ -354,13 +399,15 @@ def select(run_date):
         return redirect(url_for("show_run", run_date=run_date))
 
     shows = get_run_shows_with_scores(run_date)
-    all_ids = [s["id"] for s in shows]
+    aside = filtered_out(get_run_shows(run_date), shows, load_config())
     selected_ids = request.form.getlist("selected")
+    selected_set = {str(i) for i in selected_ids}
 
+    picked_aside = [s for s in aside if str(s["id"]) in selected_set]
+    all_ids = [s["id"] for s in shows] + [s["id"] for s in picked_aside]
     save_session(run_date, selected_ids, all_ids)
 
-    selected_set = {str(i) for i in selected_ids}
-    selected_shows = [s for s in shows if str(s["id"]) in selected_set]
+    selected_shows = [s for s in shows + picked_aside if str(s["id"]) in selected_set]
     ics_content = _build_ics(selected_shows)
 
     try:

@@ -5,5 +5,8 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .env
+env.yaml
+*.token.json
 *.db
 data/
+.ruff_cache/
